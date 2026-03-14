@@ -65,3 +65,29 @@
 2. Check **scope** in spec §16 (MVP) and §10 (integrations).
 3. Prefer the **smaller, local change** that satisfies the step.
 4. If an architectural decision is irreversible, **ask** before implementing.
+
+---
+
+## Cursor Cloud specific instructions
+
+### Services
+
+This is a single-service TypeScript/Node.js project. No external databases or Docker containers needed — SQLite is embedded via `better-sqlite3` (a native Node addon).
+
+### Common commands
+
+| Action | Command |
+|--------|---------|
+| Install deps | `pnpm install` |
+| Type-check | `pnpm run typecheck` |
+| Lint | `pnpm run lint` |
+| Test | `pnpm run test` |
+| Build | `pnpm run build` |
+| Dev (watch) | `pnpm run dev` |
+| Run demo | `npx tsx src/demo.ts` |
+
+### Gotchas
+
+- `better-sqlite3` requires native compilation. The `pnpm.onlyBuiltDependencies` allowlist in `package.json` permits build scripts for `better-sqlite3` and `esbuild`; do not use `pnpm approve-builds` (interactive).
+- The project uses `"type": "module"` (ESM). TypeScript imports must use `.js` extensions (e.g. `import { foo } from "./bar.js"`).
+- Fixture data is in `fixtures/mock-otlp-payload.json` — real Claude Code OTLP metrics. Use this for testing instead of trying to access macOS-specific paths like `~/.claude`.
