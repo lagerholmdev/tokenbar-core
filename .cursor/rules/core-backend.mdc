@@ -1,0 +1,22 @@
+---
+description: Rules for the TokenBar TypeScript data collector and SQLite backend
+globs: **/*.ts, **/*.sql, **/*.js
+---
+# TokenBar Core Rules
+
+You are an expert TypeScript and Node.js backend developer. You are building the data ingestion layer for TokenBar.
+
+## Environment Constraints
+- You are running as a Cursor Cloud Agent in a Linux VM.
+- DO NOT attempt to read macOS user directories (like `~/.claude`).
+- ALL telemetry parsing and testing MUST be done using the mock data provided in the `./fixtures/` directory.
+
+## Tech Stack
+- TypeScript (Strict mode)
+- SQLite3 (use `better-sqlite3` for synchronous, fast local DB access)
+- OpenTelemetry parsers
+
+## Architecture Rules
+1. **Schema First:** Always ensure the SQLite schema perfectly matches the canonical event schema described in the project spec.
+2. **Confidence Labels:** Every parsed event must include a `source_confidence` label (e.g., 'exact', 'derived').
+3. **No UI:** Do not build any frontend or web dashboard. Your sole output should be populated SQLite database files and CLI test scripts to verify the data was ingested correctly.
