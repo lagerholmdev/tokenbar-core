@@ -8,6 +8,9 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/index.ts",
+    "dev:listener": "tsx src/cli.ts listen",
+    "dev:sync-fixture": "tsx src/cli.ts sync-fixture",
+    "dev:replay-fixture": "tsx src/cli.ts replay-fixture",
     "lint": "eslint src/ tests/",
     "test": "vitest run",
     "test:watch": "vitest",

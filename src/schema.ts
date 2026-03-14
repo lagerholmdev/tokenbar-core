@@ -135,6 +135,22 @@ export function insertUsageEvent(
   stmt.run(event);
 }
 
+export function insertUsageEvents(
+  db: Database.Database,
+  events: UsageEvent[],
+): void {
+  if (events.length === 0) {
+    return;
+  }
+
+  const insert = db.transaction((batch: UsageEvent[]) => {
+    for (const event of batch) {
+      insertUsageEvent(db, event);
+    }
+  });
+  insert(events);
+}
+
 export function getEventCount(db: Database.Database): number {
   const row = db.prepare("SELECT COUNT(*) as count FROM usage_events").get() as { count: number };
   return row.count;
@@ -146,4 +162,20 @@ export function getTodayTokenTotal(db: Database.Database): number {
     "SELECT COALESCE(SUM(total_tokens), 0) as total FROM usage_events WHERE date(timestamp) = ?",
   ).get(today) as { total: number };
   return row.total;
+}
+
+export function getUsageSummary(db: Database.Database): {
+  events: number;
+  total_tokens: number;
+  total_cost_usd: number;
+} {
+  return db
+    .prepare(
+      "SELECT COUNT(*) as events, COALESCE(SUM(total_tokens), 0) as total_tokens, COALESCE(SUM(cost_usd), 0) as total_cost_usd FROM usage_events",
+    )
+    .get() as {
+    events: number;
+    total_tokens: number;
+    total_cost_usd: number;
+  };
 }
