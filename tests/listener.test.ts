@@ -10,7 +10,7 @@ function getFirstPayload(): OtlpPayload {
   const line = readFileSync(FIXTURE_PATH, "utf-8")
     .split(/\r?\n/)
     .map((entry) => entry.trim())
-    .find((entry) => entry.startsWith("{"));
+    .find((entry) => entry.startsWith("{") && entry.includes("claude_code.token.usage"));
 
   if (!line) {
     throw new Error("Fixture payload was not found");
