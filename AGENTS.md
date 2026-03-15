@@ -83,6 +83,7 @@ This is a single-service TypeScript/Node.js project. No external databases or Do
 | Lint | `pnpm run lint` |
 | Test | `pnpm run test` |
 | Build | `pnpm run build` |
+| Build collector bundle | `pnpm run build:collector` → `dist/tokenbar-collector.js` |
 | Dev (watch) | `pnpm run dev` |
 | Run demo | `npx tsx src/demo.ts` |
 
@@ -91,3 +92,5 @@ This is a single-service TypeScript/Node.js project. No external databases or Do
 - `better-sqlite3` requires native compilation. The `pnpm.onlyBuiltDependencies` allowlist in `package.json` permits build scripts for `better-sqlite3` and `esbuild`; do not use `pnpm approve-builds` (interactive).
 - The project uses `"type": "module"` (ESM). TypeScript imports must use `.js` extensions (e.g. `import { foo } from "./bar.js"`).
 - Fixture data is in `fixtures/mock-otlp-payload.json` — real Claude Code OTLP metrics. Use this for testing instead of trying to access macOS-specific paths like `~/.claude`.
+- **Claude Code OTLP:** `configure-claude` writes `~/.claude/settings.json` with env vars so Claude Code sends metrics to the listener. Config keys: `CLAUDE_CODE_ENABLE_TELEMETRY`, `OTEL_METRICS_EXPORTER`, `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`. See CLAUDE.md for verification steps.
+- **Collector binary:** `pnpm run build:collector` produces a single ESM bundle `dist/tokenbar-collector.js` (external: `better-sqlite3`). Run with system Node: `node dist/tokenbar-collector.js listen`. The macOS app can bundle this file plus Node (or rely on system Node) and optional `node_modules` for `better-sqlite3`. See README for launchd install.
