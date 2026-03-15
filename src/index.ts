@@ -11,6 +11,10 @@ export {
   getTodayConfidenceMix,
   getUsageSummary,
   upsertDailyRollup,
+  getEventsForExport,
+  exportEvents,
+  exportEventsAsCsv,
+  exportEventsAsJson,
 } from "./schema.js";
 export type { UsageEvent, HourlyTotal, DailyTotal } from "./schema.js";
 export { parseOtlpPayload } from "./otlp-parser.js";

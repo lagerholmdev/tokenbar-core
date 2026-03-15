@@ -189,8 +189,6 @@ export function parseOtlpPayload(payload: OtlpPayload): UsageEvent[] {
         const totalTokens = hasTokenData
           ? (builder.inputTokens ?? 0)
             + (builder.outputTokens ?? 0)
-            + (builder.cacheReadTokens ?? 0)
-            + (builder.cacheCreationTokens ?? 0)
           : null;
 
         const sourceApp = serviceName === "claude-code" ? "claude_code" as const : "other" as const;

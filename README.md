@@ -82,5 +82,21 @@ To add another telemetry source, implement the `UsageAdapter` contract in `src/a
 | `sync-fixture` | Load fixture OTLP file into DB (for testing). |
 | `replay-fixture` | POST fixture payloads to a running listener. |
 | `configure-claude` | Write OTLP env vars to `~/.claude/settings.json` so Claude Code sends metrics to the collector. |
+| `export` | Export events to stdout: `--format csv|json` (default json), optional `--days <n>`, `--db <path>`. |
 
 See [CLAUDE.md](CLAUDE.md) for dev commands and constraints.
+
+## End-to-end smoke test (Issue 5.1)
+
+To validate the full path from Claude Code request to menu bar UI:
+
+1. **Start the collector** (default DB: `~/Library/Application Support/TokenBar/tokenbar.db`):
+   ```bash
+   node dist/tokenbar-collector.js listen
+   ```
+2. **Configure Claude Code** (if not already): `node dist/tokenbar-collector.js configure-claude`. Restart Claude Code so it sends OTLP to `http://127.0.0.1:4318/v1/metrics`.
+3. **Start the TokenBar macOS app** (from the sibling `tokenbar-macos` repo). The menu bar pill shows "—" until the DB has data.
+4. **Make a real Claude Code request** (e.g. run a command or ask a question in Claude Code).
+5. **Verify:** Within about 10 seconds the pill should update with token count or cost; opening the popover shows the today chart, 7d mini chart, and confidence badge ("Exact" for Claude Code). Collector logs show ingestion; `GET http://127.0.0.1:4318/health` reflects activity.
+
+**Observed latency:** The macOS app polls the DB every 5 seconds, so the pill may lag 0–5 s after the collector writes. OTLP delivery from Claude Code is typically within 1–2 s of the request completing. End-to-end (request done → pill updated) is usually under 10 s.

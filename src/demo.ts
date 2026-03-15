@@ -38,7 +38,7 @@ function main() {
 
   const rows = db
     .prepare(
-      "SELECT model, SUM(input_tokens) as input, SUM(output_tokens) as output, SUM(cache_read_tokens) as cache_read, SUM(total_tokens) as total, SUM(cost_usd) as cost FROM usage_events GROUP BY model",
+      "SELECT model, SUM(input_tokens) as input, SUM(output_tokens) as output, SUM(cache_read_tokens) as cache_read, SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) as total, SUM(cost_usd) as cost FROM usage_events GROUP BY model",
     )
     .all() as Array<{
     model: string;

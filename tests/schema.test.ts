@@ -6,10 +6,15 @@ import {
   getHourlyTotals,
   getTodayConfidenceMix,
   getTodayCostTotal,
+  getTodayTokenTotal,
   initializeDatabase,
   insertUsageEvent,
   insertUsageEvents,
   getEventCount,
+  getEventsForExport,
+  exportEvents,
+  exportEventsAsCsv,
+  exportEventsAsJson,
   type UsageEvent,
 } from "../src/schema.js";
 
@@ -91,7 +96,7 @@ describe("schema", () => {
     expect(row.cost_usd).toBeCloseTo(0.0049);
   });
 
-  it("rollup: two events with model=null same day produce one rollup row with summed values", () => {
+  it("rollup: token totals are derived from input/output (not stored total_tokens)", () => {
     const day = "2026-03-15";
     const base: Omit<UsageEvent, "id" | "timestamp" | "total_tokens" | "cost_usd" | "imported_at"> = {
       source_app: "claude_code",
@@ -119,7 +124,7 @@ describe("schema", () => {
       ...base,
       id: "rollup-test-1",
       timestamp: `${day}T10:00:00.000Z`,
-      total_tokens: 100,
+      total_tokens: 1000,
       cost_usd: 0.001,
       imported_at: new Date().toISOString(),
     };
@@ -127,14 +132,14 @@ describe("schema", () => {
       ...base,
       id: "rollup-test-2",
       timestamp: `${day}T14:00:00.000Z`,
-      total_tokens: 200,
+      total_tokens: 2000,
       cost_usd: 0.002,
       imported_at: new Date().toISOString(),
     };
     insertUsageEvents(db, [e1, e2]);
     const rows = db.prepare("SELECT * FROM daily_usage_rollups WHERE day = ?").all(day) as { day: string; total_tokens: number; total_cost_usd: number }[];
     expect(rows).toHaveLength(1);
-    expect(rows[0].total_tokens).toBe(300);
+    expect(rows[0].total_tokens).toBe(60);
     expect(rows[0].total_cost_usd).toBeCloseTo(0.003);
   });
 
@@ -155,7 +160,7 @@ describe("schema", () => {
       output_tokens: 15,
       cache_read_tokens: null,
       cache_creation_tokens: null,
-      total_tokens: 20,
+      total_tokens: 9999,
       cost_usd: 0.0005,
       currency: "USD",
       terminal_type: null,
@@ -171,6 +176,65 @@ describe("schema", () => {
     const row = db.prepare("SELECT total_tokens, total_cost_usd FROM daily_usage_rollups WHERE day = ?").get(day) as { total_tokens: number; total_cost_usd: number };
     expect(row.total_tokens).toBe(20);
     expect(row.total_cost_usd).toBeCloseTo(0.0005);
+  });
+
+  it("getTodayTokenTotal derives tokens from input/output columns", () => {
+    const today = new Date().toISOString().slice(0, 10);
+    insertUsageEvents(db, [
+      {
+        id: "tokens-derive-1",
+        source_app: "claude_code",
+        source_kind: "ide",
+        source_confidence: "exact",
+        event_type: "api_request",
+        timestamp: `${today}T12:00:00.000Z`,
+        provider: null,
+        model: null,
+        session_id: null,
+        prompt_id: null,
+        input_tokens: 3,
+        output_tokens: 7,
+        cache_read_tokens: null,
+        cache_creation_tokens: null,
+        total_tokens: 1000,
+        cost_usd: 0,
+        currency: "USD",
+        terminal_type: null,
+        repo_path: null,
+        git_branch: null,
+        project_name: null,
+        raw_ref: null,
+        redaction_state: "none",
+        imported_at: new Date().toISOString(),
+      },
+      {
+        id: "tokens-derive-2",
+        source_app: "claude_code",
+        source_kind: "ide",
+        source_confidence: "exact",
+        event_type: "api_request",
+        timestamp: `${today}T13:00:00.000Z`,
+        provider: null,
+        model: null,
+        session_id: null,
+        prompt_id: null,
+        input_tokens: 2,
+        output_tokens: 8,
+        cache_read_tokens: null,
+        cache_creation_tokens: null,
+        total_tokens: 2000,
+        cost_usd: 0,
+        currency: "USD",
+        terminal_type: null,
+        repo_path: null,
+        git_branch: null,
+        project_name: null,
+        raw_ref: null,
+        redaction_state: "none",
+        imported_at: new Date().toISOString(),
+      },
+    ]);
+    expect(getTodayTokenTotal(db)).toBe(20);
   });
 
   it("getTodayCostTotal returns sum of cost_usd for today", () => {
@@ -473,5 +537,180 @@ describe("schema", () => {
     };
 
     expect(() => insertUsageEvent(db, badEvent)).toThrow();
+  });
+
+  it("getEventsForExport returns all events without days filter", () => {
+    const event: UsageEvent = {
+      id: "export-1",
+      source_app: "claude_code",
+      source_kind: "cli",
+      source_confidence: "exact",
+      event_type: "api_request",
+      timestamp: "2026-03-10T12:00:00.000Z",
+      provider: "anthropic",
+      model: "claude-3",
+      session_id: null,
+      prompt_id: null,
+      input_tokens: 10,
+      output_tokens: 20,
+      cache_read_tokens: null,
+      cache_creation_tokens: null,
+      total_tokens: 30,
+      cost_usd: 0.001,
+      currency: "USD",
+      terminal_type: null,
+      repo_path: null,
+      git_branch: null,
+      project_name: null,
+      raw_ref: null,
+      redaction_state: "none",
+      imported_at: new Date().toISOString(),
+    };
+    insertUsageEvent(db, event);
+    const events = getEventsForExport(db);
+    expect(events).toHaveLength(1);
+    expect(events[0].id).toBe("export-1");
+    expect(events[0].total_tokens).toBe(30);
+  });
+
+  it("getEventsForExport with days filters by date", () => {
+    const today = new Date().toISOString().slice(0, 10);
+    insertUsageEvents(db, [
+      {
+        id: "recent",
+        source_app: "claude_code",
+        source_kind: "cli",
+        source_confidence: "exact",
+        event_type: "api_request",
+        timestamp: `${today}T12:00:00.000Z`,
+        provider: null,
+        model: null,
+        session_id: null,
+        prompt_id: null,
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_read_tokens: null,
+        cache_creation_tokens: null,
+        total_tokens: 3,
+        cost_usd: 0,
+        currency: null,
+        terminal_type: null,
+        repo_path: null,
+        git_branch: null,
+        project_name: null,
+        raw_ref: null,
+        redaction_state: "none",
+        imported_at: new Date().toISOString(),
+      },
+      {
+        id: "old",
+        source_app: "claude_code",
+        source_kind: "cli",
+        source_confidence: "exact",
+        event_type: "api_request",
+        timestamp: "2020-01-01T12:00:00.000Z",
+        provider: null,
+        model: null,
+        session_id: null,
+        prompt_id: null,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: null,
+        cache_creation_tokens: null,
+        total_tokens: 0,
+        cost_usd: 0,
+        currency: null,
+        terminal_type: null,
+        repo_path: null,
+        git_branch: null,
+        project_name: null,
+        raw_ref: null,
+        redaction_state: "none",
+        imported_at: new Date().toISOString(),
+      },
+    ]);
+    const events = getEventsForExport(db, 30);
+    expect(events.length).toBeLessThanOrEqual(2);
+    const ids = events.map((e) => e.id);
+    expect(ids).toContain("recent");
+  });
+
+  it("exportEventsAsCsv produces valid CSV with header", () => {
+    const events: UsageEvent[] = [
+      {
+        id: "csv-1",
+        source_app: "claude_code",
+        source_kind: "cli",
+        source_confidence: "exact",
+        event_type: "api_request",
+        timestamp: "2026-03-15T10:00:00.000Z",
+        provider: null,
+        model: null,
+        session_id: null,
+        prompt_id: null,
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_read_tokens: null,
+        cache_creation_tokens: null,
+        total_tokens: 3,
+        cost_usd: 0.001,
+        currency: null,
+        terminal_type: null,
+        repo_path: null,
+        git_branch: null,
+        project_name: null,
+        raw_ref: null,
+        redaction_state: "none",
+        imported_at: "2026-03-15T10:00:00.000Z",
+      },
+    ];
+    const csv = exportEventsAsCsv(events);
+    expect(csv).toContain("id,");
+    expect(csv).toContain("csv-1");
+    expect(csv).toContain("claude_code");
+    const lines = csv.split("\n");
+    expect(lines.length).toBe(2);
+  });
+
+  it("exportEventsAsJson produces valid JSON array", () => {
+    const events: UsageEvent[] = [];
+    expect(exportEventsAsJson(events)).toBe("[]");
+    const one: UsageEvent = {
+      id: "j1",
+      source_app: "claude_code",
+      source_kind: "cli",
+      source_confidence: "exact",
+      event_type: "api_request",
+      timestamp: "2026-03-15T10:00:00.000Z",
+      provider: null,
+      model: null,
+      session_id: null,
+      prompt_id: null,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: null,
+      cache_creation_tokens: null,
+      total_tokens: 0,
+      cost_usd: 0,
+      currency: null,
+      terminal_type: null,
+      repo_path: null,
+      git_branch: null,
+      project_name: null,
+      raw_ref: null,
+      redaction_state: "none",
+      imported_at: "2026-03-15T10:00:00.000Z",
+    };
+    const json = exportEventsAsJson([one]);
+    const parsed = JSON.parse(json);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].id).toBe("j1");
+  });
+
+  it("exportEvents returns CSV or JSON string", () => {
+    const csv = exportEvents(db, "csv");
+    expect(csv).toMatch(/^id,/);
+    const json = exportEvents(db, "json");
+    expect(json).toBe("[]");
   });
 });

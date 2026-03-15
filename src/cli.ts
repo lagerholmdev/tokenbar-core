@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { ClaudeCodeAdapter, readFixturePayloads } from "./adapters/claude-code.js";
 import { startCollectorListener } from "./collector/listener.js";
 import { syncAdapterIntoDatabase } from "./collector/runtime.js";
-import { defaultDbPath, getUsageSummary, initializeDatabase } from "./schema.js";
+import { defaultDbPath, exportEvents, getUsageSummary, initializeDatabase } from "./schema.js";
 
 const DEFAULT_FIXTURE_PATH = resolve(process.cwd(), "fixtures/mock-otlp-payload.json");
 const DEFAULT_LISTENER_ENDPOINT = "http://127.0.0.1:4318/v1/metrics";
@@ -134,6 +134,33 @@ function runConfigureClaude(args: string[]): void {
   console.log("3. Make a request in Claude Code; then GET http://127.0.0.1:4318/health to verify ingestion");
 }
 
+function runExport(args: string[]): void {
+  const dbPath = getOption(args, "--db") ? resolve(process.cwd(), getOption(args, "--db")!) : defaultDbPath();
+  const format = (getOption(args, "--format") ?? "json").toLowerCase() as "csv" | "json";
+  if (format !== "csv" && format !== "json") {
+    throw new Error("--format must be csv or json");
+  }
+  const daysStr = getOption(args, "--days");
+  let days: number | undefined;
+  if (daysStr != null) {
+    const d = parseInt(daysStr, 10);
+    if (!Number.isInteger(d) || d < 1) {
+      throw new Error("--days must be a positive integer");
+    }
+    days = d;
+  } else {
+    days = undefined;
+  }
+  ensureParentDirectory(dbPath);
+  const db = initializeDatabase(dbPath);
+  const out = exportEvents(db, format, days);
+  db.close();
+  process.stdout.write(out);
+  if (format === "json" && !out.endsWith("\n")) {
+    process.stdout.write("\n");
+  }
+}
+
 async function main(): Promise<void> {
   const [command = "help", ...args] = process.argv.slice(2);
   if (command === "listen") {
@@ -152,6 +179,10 @@ async function main(): Promise<void> {
     runConfigureClaude(args);
     return;
   }
+  if (command === "export") {
+    runExport(args);
+    return;
+  }
 
   console.log("TokenBar core CLI");
   console.log("Commands:");
@@ -159,6 +190,7 @@ async function main(): Promise<void> {
   console.log("  sync-fixture [--db <path>] [--fixture <path>]");
   console.log("  replay-fixture [--fixture <path>] [--endpoint <url>]");
   console.log("  configure-claude [--settings <path>]");
+  console.log("  export [--db <path>] [--format csv|json] [--days <n>]");
 }
 
 void main();

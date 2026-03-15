@@ -160,12 +160,16 @@ function rollupKey(s: string | null): string {
   return s ?? "";
 }
 
+function eventUsageTokens(event: Pick<UsageEvent, "input_tokens" | "output_tokens">): number {
+  return (event.input_tokens ?? 0) + (event.output_tokens ?? 0);
+}
+
 /** Upsert one event's contribution into daily_usage_rollups. Idempotent when called once per new event. */
 export function upsertDailyRollup(db: Database.Database, event: UsageEvent): void {
   const day = event.timestamp.slice(0, 10);
   const provider = rollupKey(event.provider);
   const model = rollupKey(event.model);
-  const totalTokens = event.total_tokens ?? 0;
+  const totalTokens = eventUsageTokens(event);
   const costUsd = event.cost_usd ?? 0;
   const exact = event.source_confidence === "exact" ? 1 : 0;
   const derived = event.source_confidence === "derived" ? 1 : 0;
@@ -212,7 +216,7 @@ export function getEventCount(db: Database.Database): number {
 export function getTodayTokenTotal(db: Database.Database): number {
   const today = new Date().toISOString().slice(0, 10);
   const row = db.prepare(
-    "SELECT COALESCE(SUM(total_tokens), 0) as total FROM usage_events WHERE date(timestamp) = ?",
+    "SELECT COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0) as total FROM usage_events WHERE date(timestamp) = ?",
   ).get(today) as { total: number };
   return row.total;
 }
@@ -238,7 +242,7 @@ export function getHourlyTotals(db: Database.Database, date: string): HourlyTota
   const rows = db
     .prepare(
       `SELECT CAST(strftime('%H', timestamp) AS INTEGER) as hour,
-              COALESCE(SUM(total_tokens), 0) as tokens,
+              COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0) as tokens,
               COALESCE(SUM(cost_usd), 0) as cost_usd
        FROM usage_events
        WHERE timestamp >= ? AND timestamp <= ?
@@ -271,10 +275,12 @@ export function getDailyTotals(db: Database.Database, days: number): DailyTotal[
   const startDay = start.toISOString().slice(0, 10);
   const rows = db
     .prepare(
-      `SELECT day, SUM(total_tokens) as tokens, SUM(total_cost_usd) as cost_usd
-       FROM daily_usage_rollups
-       WHERE day >= ? AND day <= ?
-       GROUP BY day
+      `SELECT date(timestamp) as day,
+              COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0) as tokens,
+              COALESCE(SUM(cost_usd), 0) as cost_usd
+       FROM usage_events
+       WHERE date(timestamp) >= ? AND date(timestamp) <= ?
+       GROUP BY date(timestamp)
        ORDER BY day ASC`,
     )
     .all(startDay, today) as { day: string; tokens: number; cost_usd: number }[];
@@ -310,11 +316,96 @@ export function getUsageSummary(db: Database.Database): {
 } {
   return db
     .prepare(
-      "SELECT COUNT(*) as events, COALESCE(SUM(total_tokens), 0) as total_tokens, COALESCE(SUM(cost_usd), 0) as total_cost_usd FROM usage_events",
+      "SELECT COUNT(*) as events, COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0) as total_tokens, COALESCE(SUM(cost_usd), 0) as total_cost_usd FROM usage_events",
     )
     .get() as {
     events: number;
     total_tokens: number;
     total_cost_usd: number;
   };
+}
+
+/** Events for export (last N days). No prompt/code content; schema is already privacy-safe. */
+export function getEventsForExport(
+  db: Database.Database,
+  days?: number,
+): UsageEvent[] {
+  let sql = "SELECT * FROM usage_events";
+  const args: unknown[] = [];
+  if (days != null && days > 0) {
+    const start = new Date();
+    start.setDate(start.getDate() - days);
+    const startDay = start.toISOString().slice(0, 10);
+    sql += " WHERE date(timestamp) >= ?";
+    args.push(startDay);
+  }
+  sql += " ORDER BY timestamp ASC";
+  const rows = db.prepare(sql).all(...args) as Record<string, unknown>[];
+  return rows.map(rowToUsageEvent);
+}
+
+function rowToUsageEvent(row: Record<string, unknown>): UsageEvent {
+  return {
+    id: String(row.id ?? ""),
+    source_app: row.source_app as UsageEvent["source_app"],
+    source_kind: row.source_kind as UsageEvent["source_kind"],
+    source_confidence: row.source_confidence as UsageEvent["source_confidence"],
+    event_type: row.event_type as UsageEvent["event_type"],
+    timestamp: String(row.timestamp ?? ""),
+    provider: row.provider as string | null,
+    model: row.model as string | null,
+    session_id: row.session_id as string | null,
+    prompt_id: row.prompt_id as string | null,
+    input_tokens: row.input_tokens as number | null,
+    output_tokens: row.output_tokens as number | null,
+    cache_read_tokens: row.cache_read_tokens as number | null,
+    cache_creation_tokens: row.cache_creation_tokens as number | null,
+    total_tokens: row.total_tokens as number | null,
+    cost_usd: row.cost_usd as number | null,
+    currency: row.currency as string | null,
+    terminal_type: row.terminal_type as string | null,
+    repo_path: row.repo_path as string | null,
+    git_branch: row.git_branch as string | null,
+    project_name: row.project_name as string | null,
+    raw_ref: row.raw_ref as string | null,
+    redaction_state: row.redaction_state as UsageEvent["redaction_state"],
+    imported_at: String(row.imported_at ?? ""),
+  };
+}
+
+/** Serialize events to CSV (header + rows). Escapes quotes. */
+export function exportEventsAsCsv(events: UsageEvent[]): string {
+  const columns: (keyof UsageEvent)[] = [
+    "id", "source_app", "source_kind", "source_confidence", "event_type", "timestamp",
+    "provider", "model", "session_id", "prompt_id",
+    "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "total_tokens",
+    "cost_usd", "currency",
+    "terminal_type", "repo_path", "git_branch", "project_name",
+    "raw_ref", "redaction_state", "imported_at",
+  ];
+  const escape = (v: unknown): string => {
+    const s = v === null || v === undefined ? "" : String(v);
+    if (s.includes('"') || s.includes(",") || s.includes("\n")) {
+      return `"${s.replace(/"/g, '""')}"`;
+    }
+    return s;
+  };
+  const header = columns.join(",");
+  const lines = events.map((e) => columns.map((c) => escape(e[c])).join(","));
+  return [header, ...lines].join("\n");
+}
+
+/** Serialize events to JSON array. */
+export function exportEventsAsJson(events: UsageEvent[]): string {
+  return JSON.stringify(events, null, 0);
+}
+
+/** Export events in the given format. Writes to the provided stream or returns string. */
+export function exportEvents(
+  db: Database.Database,
+  format: "csv" | "json",
+  days?: number,
+): string {
+  const events = getEventsForExport(db, days);
+  return format === "csv" ? exportEventsAsCsv(events) : exportEventsAsJson(events);
 }
