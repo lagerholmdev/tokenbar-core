@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TokenBar Data Pipeline</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@300;400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1c2128;
+    --border: #30363d;
+    --accent:  #f78166;
+    --accent2: #79c0ff;
+    --accent3: #7ee787;
+    --accent4: #d2a8ff;
+    --accent5: #ffa657;
+    --text:    #e6edf3;
+    --muted:   #8b949e;
+    --dim:     #484f58;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    min-height: 100vh;
+    padding: 40px 40px 60px;
+  }
+
+  /* ── Header ── */
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    max-width: 960px;
+    margin: 0 auto 52px;
+  }
+  .eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 6px;
+  }
+  .big-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 30px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.02em;
+    line-height: 1;
+  }
+  .big-title em { color: var(--accent2); font-style: normal; }
+  .header-right {
+    text-align: right;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--dim);
+    line-height: 1.9;
+  }
+
+  /* ── Pipeline ── */
+  .pipeline {
+    max-width: 960px;
+    margin: 0 auto;
+    position: relative;
+  }
+
+  /* spine line */
+  .pipeline::before {
+    content: '';
+    position: absolute;
+    top: 16px;
+    left: 15px;
+    bottom: 16px;
+    width: 2px;
+    background: linear-gradient(
+      to bottom,
+      var(--accent5),
+      var(--accent2) 25%,
+      var(--accent) 50%,
+      var(--accent3) 75%,
+      var(--accent4)
+    );
+    opacity: 0.35;
+    border-radius: 2px;
+  }
+
+  /* ── Stage row ── */
+  .stage {
+    display: flex;
+    gap: 28px;
+    margin-bottom: 12px;
+    position: relative;
+    opacity: 0;
+    transform: translateY(12px);
+    animation: appear 0.45s ease forwards;
+  }
+  .stage:nth-child(1) { animation-delay: 0.05s; }
+  .stage:nth-child(2) { animation-delay: 0.2s;  }
+  .stage:nth-child(3) { animation-delay: 0.35s; }
+  .stage:nth-child(4) { animation-delay: 0.5s;  }
+  .stage:nth-child(5) { animation-delay: 0.65s; }
+
+  @keyframes appear {
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── Step bubble ── */
+  .step-col {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 3px;
+  }
+  .bubble {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 2px solid;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    font-size: 13px;
+    background: var(--bg);
+    flex-shrink: 0;
+    position: relative;
+    z-index: 1;
+  }
+  .connector {
+    flex: 1;
+    width: 2px;
+    min-height: 20px;
+    background: var(--border);
+    opacity: 0.4;
+    border-radius: 0 0 2px 2px;
+  }
+
+  /* per-stage colours */
+  .s-source .bubble { color: var(--accent5); border-color: var(--accent5); }
+  .s-http   .bubble { color: var(--accent2); border-color: var(--accent2); }
+  .s-parse  .bubble { color: var(--accent);  border-color: var(--accent);  }
+  .s-db     .bubble { color: var(--accent3); border-color: var(--accent3); }
+  .s-macos  .bubble { color: var(--accent4); border-color: var(--accent4); }
+
+  .s-source .card { border-top-color: var(--accent5); }
+  .s-http   .card { border-top-color: var(--accent2); }
+  .s-parse  .card { border-top-color: var(--accent);  }
+  .s-db     .card { border-top-color: var(--accent3); }
+  .s-macos  .card { border-top-color: var(--accent4); }
+
+  /* ── Card ── */
+  .card {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-top-width: 3px;
+    border-radius: 10px;
+    padding: 18px 22px 20px;
+    margin-bottom: 12px;
+    transition: box-shadow 0.18s;
+  }
+  .card:hover {
+    box-shadow: 0 4px 24px rgba(0,0,0,0.45);
+  }
+
+  /* ── Card header ── */
+  .card-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .card-icon { font-size: 18px; line-height: 1; }
+  .card-title {
+    font-weight: 700;
+    font-size: 15px;
+    color: var(--text);
+  }
+  .card-file {
+    margin-left: auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--dim);
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 7px;
+    white-space: nowrap;
+  }
+
+  /* ── Body text ── */
+  .card-body {
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.65;
+    margin-bottom: 12px;
+  }
+  .card-body code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11.5px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+  }
+
+  /* ── Tags ── */
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    padding: 3px 9px;
+    border-radius: 5px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .t-o { color: var(--accent5); border-color: #ffa65745; background: #ffa65712; }
+  .t-b { color: var(--accent2); border-color: #79c0ff45; background: #79c0ff12; }
+  .t-r { color: var(--accent);  border-color: #f7816645; background: #f7816612; }
+  .t-g { color: var(--accent3); border-color: #7ee78745; background: #7ee78712; }
+  .t-p { color: var(--accent4); border-color: #d2a8ff45; background: #d2a8ff12; }
+
+  /* ── Code block ── */
+  .cb {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 11px 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    line-height: 1.75;
+    color: var(--muted);
+    overflow-x: auto;
+  }
+  .kw  { color: #ff7b72; }
+  .fn  { color: var(--accent2); }
+  .st  { color: #a5d6ff; }
+  .nu  { color: var(--accent5); }
+  .cm  { color: var(--dim); }
+  .fd  { color: var(--accent4); }
+
+  /* ── Two-column DB layout ── */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-top: 12px;
+  }
+  .col-head {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 8px;
+  }
+  .tname {
+    display: inline-block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 5px;
+    margin-bottom: 8px;
+  }
+  .tname-g { color: var(--accent3); background: #7ee78712; border: 1px solid #7ee78745; }
+  .tname-b { color: var(--accent2); background: #79c0ff12; border: 1px solid #79c0ff45; }
+
+  .field-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+    gap: 5px;
+  }
+  .field-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    padding: 4px 8px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    gap: 6px;
+  }
+  .field-row .fn2 { color: var(--text); }
+  .field-row .ft  { color: var(--dim); font-size: 9px; }
+
+  /* ── Arrow connector between stages ── */
+  .arrow {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin: 0 0 12px 60px;
+    opacity: 0;
+    animation: appear 0.3s ease forwards;
+  }
+  .arrow:nth-of-type(1) { animation-delay: 0.25s; }
+  .arrow:nth-of-type(2) { animation-delay: 0.4s; }
+  .arrow:nth-of-type(3) { animation-delay: 0.55s; }
+  .arrow:nth-of-type(4) { animation-delay: 0.7s; }
+
+  .arrow-stem {
+    width: 2px;
+    height: 28px;
+    border-radius: 2px;
+    flex-shrink: 0;
+    margin-right: 18px;
+  }
+  .arrow-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--dim);
+    letter-spacing: 0.06em;
+  }
+
+  /* ── Footer legend ── */
+  .footer {
+    max-width: 960px;
+    margin: 36px auto 0;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    align-items: center;
+  }
+  .leg-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .leg-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .footer-right {
+    margin-left: auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--dim);
+    line-height: 1.8;
+    text-align: right;
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══ HEADER ═══ -->
+<div class="header">
+  <div>
+    <div class="eyebrow">tokenbar-core + tokenbar-macos</div>
+    <div class="big-title">Data <em>Pipeline</em></div>
+  </div>
+  <div class="header-right">
+    100% local · no cloud sync<br>
+    WAL-mode SQLite · ESM TypeScript · Swift 6
+  </div>
+</div>
+
+<!-- ═══ PIPELINE ═══ -->
+<div class="pipeline">
+
+  <!-- ── Stage 1: Claude Code ── -->
+  <div class="stage s-source">
+    <div class="step-col">
+      <div class="bubble">1</div>
+      <div class="connector"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <span class="card-icon">⚡</span>
+        <span class="card-title">Claude Code</span>
+        <span class="card-file">~/.claude/settings.json</span>
+      </div>
+      <div class="card-body">
+        Configured via <code>tokenbar-collector configure-claude</code>, which patches
+        <code>~/.claude/settings.json</code> with OTLP env vars. Claude Code then emits
+        OpenTelemetry metrics over HTTP on every API request. The source is always
+        classified as <code>source_app: "claude_code"</code> with confidence <code>"exact"</code>.
+      </div>
+      <div class="tags">
+        <span class="tag t-o">CLAUDE_CODE_ENABLE_TELEMETRY=1</span>
+        <span class="tag t-o">OTEL_METRICS_EXPORTER=otlp</span>
+        <span class="tag t-o">OTEL_EXPORTER_OTLP_PROTOCOL=http/json</span>
+        <span class="tag t-o">OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://127.0.0.1:4318/v1/metrics</span>
+      </div>
+      <div class="cb">
+        <span class="cm">// also enabled for logs + traces</span><br>
+        OTEL_LOGS_EXPORTER=otlp  · endpoint <span class="st">/v1/logs</span><br>
+        OTEL_TRACES_EXPORTER=otlp · endpoint <span class="st">/v1/traces</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- arrow 1 -->
+  <div class="arrow">
+    <div class="arrow-stem" style="background:linear-gradient(to bottom,var(--accent5),var(--accent2));"></div>
+    <div class="arrow-text">HTTP POST · application/json · OTLP metrics payload (nanosecond timestamps)</div>
+  </div>
+
+  <!-- ── Stage 2: CollectorListener ── -->
+  <div class="stage s-http">
+    <div class="step-col">
+      <div class="bubble">2</div>
+      <div class="connector"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <span class="card-icon">📡</span>
+        <span class="card-title">CollectorListener</span>
+        <span class="card-file">src/collector/listener.ts</span>
+      </div>
+      <div class="card-body">
+        Plain Node.js <code>http.createServer</code> bound to <code>127.0.0.1:4318</code>. Reads the full
+        request body (≤ 5 MB), immediately archives the raw JSON to <code>raw_payloads</code>,
+        then hands the body to the parser. Accepts both a single OTLP object
+        and NDJSON (multiple payloads separated by newlines).
+      </div>
+      <div class="tags">
+        <span class="tag t-b">POST /v1/metrics → parse + insert</span>
+        <span class="tag t-b">POST /v1/logs → archive only</span>
+        <span class="tag t-b">POST /v1/traces → archive only</span>
+        <span class="tag t-b">GET /health → 200 + summary JSON</span>
+      </div>
+      <div class="cb">
+        <span class="kw">const</span> body = <span class="kw">await</span> <span class="fn">readBody</span>(req, <span class="nu">5_242_880</span>);<br>
+        <span class="fn">insertRawPayload</span>(db, <span class="st">"metrics"</span>, body);   <span class="cm">// archive first</span><br>
+        <span class="kw">const</span> payloads = <span class="fn">parsePayloadsFromBody</span>(body); <span class="cm">// handles NDJSON</span><br>
+        <span class="kw">const</span> events   = payloads.<span class="fn">flatMap</span>(p =&gt; <span class="fn">parseOtlpPayload</span>(p));<br>
+        <span class="fn">insertUsageEvents</span>(db, events);
+      </div>
+    </div>
+  </div>
+
+  <!-- arrow 2 -->
+  <div class="arrow">
+    <div class="arrow-stem" style="background:linear-gradient(to bottom,var(--accent2),var(--accent));"></div>
+    <div class="arrow-text">OtlpPayload[] → parseOtlpPayload() → UsageEvent[]</div>
+  </div>
+
+  <!-- ── Stage 3: OTLP Parser ── -->
+  <div class="stage s-parse">
+    <div class="step-col">
+      <div class="bubble">3</div>
+      <div class="connector"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <span class="card-icon">🔬</span>
+        <span class="card-title">parseOtlpPayload()</span>
+        <span class="card-file">src/otlp-parser.ts</span>
+      </div>
+      <div class="card-body">
+        Walks <code>resourceMetrics → scopeMetrics → metrics</code>. Groups data points by
+        a composite key of <code>session_id | prompt_id | model | timeUnixNano</code>.
+        Merges four separate token-type data points (input / output / cacheRead /
+        cacheCreation) and the cost data point into a single <code>UsageEvent</code> per
+        request. Also correlates <code>active_time_seconds</code> from a separate
+        <code>claude_code.active_time.total</code> metric series via session+time key.
+      </div>
+      <div class="tags">
+        <span class="tag t-r">claude_code.token.usage → input / output / cacheRead / cacheCreation</span>
+        <span class="tag t-r">claude_code.cost.usage → cost_usd</span>
+        <span class="tag t-r">claude_code.active_time.total → active_time_seconds</span>
+      </div>
+      <div class="cb">
+        <span class="cm">// Composite grouping key per unique API request</span><br>
+        key = <span class="st">`${sessionId}|${promptId}|${model}|${timeUnixNano}`</span><br><br>
+        <span class="cm">// Confidence stamp — only "exact" for official claude-code telemetry</span><br>
+        <span class="fd">source_confidence</span>: service === <span class="st">"claude-code"</span> ? <span class="st">"exact"</span> : <span class="st">"derived"</span><br><br>
+        <span class="cm">// Timestamp: nanoseconds → ISO 8601</span><br>
+        <span class="fn">nanoToIso</span>(nanoStr) → <span class="fn">BigInt</span>(nanoStr) / <span class="nu">1_000_000n</span> → new <span class="fn">Date</span>(ms).<span class="fn">toISOString</span>()
+      </div>
+    </div>
+  </div>
+
+  <!-- arrow 3 -->
+  <div class="arrow">
+    <div class="arrow-stem" style="background:linear-gradient(to bottom,var(--accent),var(--accent3));"></div>
+    <div class="arrow-text">insertUsageEvents() · better-sqlite3 · WAL transaction</div>
+  </div>
+
+  <!-- ── Stage 4: SQLite ── -->
+  <div class="stage s-db">
+    <div class="step-col">
+      <div class="bubble">4</div>
+      <div class="connector"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <span class="card-icon">🗄️</span>
+        <span class="card-title">SQLite (tokenbar.db)</span>
+        <span class="card-file">~/Library/Application Support/TokenBar/tokenbar.db</span>
+      </div>
+      <div class="card-body">
+        WAL-mode SQLite managed by <code>better-sqlite3</code>. Canonical schema in
+        <code>src/schema.ts</code>. Writes use <code>INSERT OR REPLACE</code> inside a
+        synchronous transaction. Two indices accelerate the macOS app's most common
+        queries (by timestamp; by source_app + timestamp). Two separate tables:
+      </div>
+      <div class="two-col">
+        <div>
+          <div class="col-head">primary store</div>
+          <div><span class="tname tname-g">usage_events</span></div>
+          <div class="field-grid">
+            <div class="field-row"><span class="fn2">id</span><span class="ft">UUID PK</span></div>
+            <div class="field-row"><span class="fn2">source_app</span><span class="ft">TEXT ✓</span></div>
+            <div class="field-row"><span class="fn2">source_kind</span><span class="ft">TEXT ✓</span></div>
+            <div class="field-row"><span class="fn2">source_confidence</span><span class="ft">TEXT ✓</span></div>
+            <div class="field-row"><span class="fn2">event_type</span><span class="ft">TEXT ✓</span></div>
+            <div class="field-row"><span class="fn2">timestamp</span><span class="ft">ISO8601</span></div>
+            <div class="field-row"><span class="fn2">provider</span><span class="ft">TEXT</span></div>
+            <div class="field-row"><span class="fn2">model</span><span class="ft">TEXT</span></div>
+            <div class="field-row"><span class="fn2">session_id</span><span class="ft">TEXT</span></div>
+            <div class="field-row"><span class="fn2">prompt_id</span><span class="ft">TEXT</span></div>
+            <div class="field-row"><span class="fn2">input_tokens</span><span class="ft">INT</span></div>
+            <div class="field-row"><span class="fn2">output_tokens</span><span class="ft">INT</span></div>
+            <div class="field-row"><span class="fn2">cache_read_tokens</span><span class="ft">INT</span></div>
+            <div class="field-row"><span class="fn2">cache_creation_tokens</span><span class="ft">INT</span></div>
+            <div class="field-row"><span class="fn2">total_tokens</span><span class="ft">INT</span></div>
+            <div class="field-row"><span class="fn2">cost_usd</span><span class="ft">REAL</span></div>
+            <div class="field-row"><span class="fn2">currency</span><span class="ft">TEXT</span></div>
+            <div class="field-row"><span class="fn2">active_time_seconds</span><span class="ft">REAL</span></div>
+            <div class="field-row"><span class="fn2">terminal_type</span><span class="ft">TEXT</span></div>
+            <div class="field-row"><span class="fn2">repo_path</span><span class="ft">TEXT</span></div>
+            <div class="field-row"><span class="fn2">git_branch</span><span class="ft">TEXT</span></div>
+            <div class="field-row"><span class="fn2">project_name</span><span class="ft">TEXT</span></div>
+            <div class="field-row"><span class="fn2">raw_ref</span><span class="ft">TEXT</span></div>
+            <div class="field-row"><span class="fn2">redaction_state</span><span class="ft">none…</span></div>
+            <div class="field-row"><span class="fn2">imported_at</span><span class="ft">ISO8601</span></div>
+          </div>
+          <div style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:9.5px;color:var(--dim);">
+            idx: timestamp · source_app+timestamp
+          </div>
+        </div>
+        <div>
+          <div class="col-head">raw archive</div>
+          <div><span class="tname tname-b">raw_payloads</span></div>
+          <div class="field-grid">
+            <div class="field-row"><span class="fn2">id</span><span class="ft">ROWID PK</span></div>
+            <div class="field-row"><span class="fn2">kind</span><span class="ft">metrics…</span></div>
+            <div class="field-row"><span class="fn2">received_at</span><span class="ft">ISO8601</span></div>
+            <div class="field-row"><span class="fn2">body</span><span class="ft">TEXT (full JSON)</span></div>
+          </div>
+          <div style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:9.5px;color:var(--dim);">
+            verbatim OTLP body · debug / replay<br>
+            idx: kind + received_at
+          </div>
+          <div style="margin-top:20px;">
+            <div class="col-head">db config</div>
+            <div class="tags" style="margin-bottom:0;">
+              <span class="tag t-g">journal_mode = WAL</span>
+              <span class="tag t-g">foreign_keys = ON</span>
+              <span class="tag t-g">INSERT OR REPLACE</span>
+              <span class="tag t-g">synchronous transaction</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- arrow 4 -->
+  <div class="arrow">
+    <div class="arrow-stem" style="background:linear-gradient(to bottom,var(--accent3),var(--accent4));"></div>
+    <div class="arrow-text">GRDB · read-only DatabaseQueue · polled by SwiftUI on timer</div>
+  </div>
+
+  <!-- ── Stage 5: macOS App ── -->
+  <div class="stage s-macos">
+    <div class="step-col">
+      <div class="bubble">5</div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <span class="card-icon">🍎</span>
+        <span class="card-title">tokenbar-macos</span>
+        <span class="card-file">UsageRepository.swift + SwiftUI MenuBarExtra</span>
+      </div>
+      <div class="card-body">
+        Swift 6 menu bar app. Opens the canonical DB path in <em>read-only</em> mode
+        via GRDB's <code>DatabaseQueue</code>. Never writes. Queries are keyed to
+        <code>date(timestamp)</code> for today's totals and window functions for history.
+        The repository returns zero/empty when the DB doesn't exist yet (collector not running).
+      </div>
+      <div class="tags">
+        <span class="tag t-p">getTodayTokenTotal()</span>
+        <span class="tag t-p">getTodayCostTotal()</span>
+        <span class="tag t-p">getTodayInputTokenTotal()</span>
+        <span class="tag t-p">getTodayOutputTokenTotal()</span>
+        <span class="tag t-p">getSevenDayDailySummaries()</span>
+        <span class="tag t-p">getRecentSessions()</span>
+        <span class="tag t-p">getModelBreakdown()</span>
+      </div>
+      <div class="cb">
+        <span class="cm">// Opened once, read-only, never writes</span><br>
+        <span class="kw">var</span> config = <span class="fn">Configuration</span>()<br>
+        config.<span class="fd">readonly</span> = <span class="kw">true</span><br>
+        dbQueue = <span class="kw">try</span> <span class="fn">DatabaseQueue</span>(path: <span class="fd">DbPath.canonical</span>, configuration: config)<br><br>
+        <span class="cm">// Canonical DB path (matches defaultDbPath() in schema.ts)</span><br>
+        <span class="st">"~/Library/Application Support/TokenBar/tokenbar.db"</span>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /pipeline -->
+
+<!-- ═══ FOOTER ═══ -->
+<div class="footer">
+  <div class="leg-item"><div class="leg-dot" style="background:var(--accent5);"></div>Source</div>
+  <div class="leg-item"><div class="leg-dot" style="background:var(--accent2);"></div>Transport</div>
+  <div class="leg-item"><div class="leg-dot" style="background:var(--accent);"></div>Parser</div>
+  <div class="leg-item"><div class="leg-dot" style="background:var(--accent3);"></div>Storage</div>
+  <div class="leg-item"><div class="leg-dot" style="background:var(--accent4);"></div>Consumer</div>
+  <div class="footer-right">
+    tokenbar-core — ESM TypeScript · better-sqlite3<br>
+    tokenbar-macos — Swift 6 · SwiftUI · GRDB
+  </div>
+</div>
+
+</body>
+</html>

@@ -1,21 +1,22 @@
 # TokenBar Core
 
-Open-source TypeScript data collector for [TokenBar](.cursor/tokenbar-spec.md): it reads local AI telemetry (e.g. Claude Code OpenTelemetry), maps it to a canonical schema, and writes to a local SQLite database. A separate macOS app (or any reader) can consume that database to show usage in the menu bar and charts.
+Open-source TypeScript data collector for [TokenBar](.cursor/tokenbar-spec.md): it reads local AI telemetry (e.g. Claude Code OpenTelemetry), normalizes it into bronze/silver tables, and exposes a single gold surface in SQLite. A separate macOS app (or any reader) can consume that database to show usage in the menu bar and charts.
 
 **Open-core:** This repo is the plumbing; the menu bar UI lives in a sibling closed-source app that reads the same DB.
 
-## Data flow
+## Data flow (medallion)
 
-```
-Claude Code (OTLP metrics)
-  → HTTP POST to collector (localhost:4318/v1/metrics)
-  → parseOtlpPayload() → UsageEvent[]
-  → insertUsageEvents() → SQLite
-  → DB at canonical path (see below)
+```text
+Claude Code (OTLP metrics/logs/traces)
+  → HTTP POST to collector (localhost:4318/v1/metrics|logs|traces)
+  → bronze_raw_payloads (raw OTLP JSON per request)
+  → silver_metric_points / silver_log_records / silver_span_records (normalized rows)
+  → usage_events (gold view over silver_log_records)
+  → DB at canonical path (see below) read by the macOS app
 ```
 
-- **Collector:** `listen` command runs an HTTP server that accepts OTLP JSON payloads and writes to SQLite.
-- **Config:** Run `configure-claude` so Claude Code sends metrics to the collector; see [CLAUDE.md](CLAUDE.md#claude-code-otlp-configuration).
+- **Collector:** `listen` command runs an HTTP server that accepts OTLP JSON payloads and writes to SQLite (bronze + silver).
+- **Config:** Run `configure-claude` so Claude Code sends metrics/logs/traces to the collector; see [CLAUDE.md](CLAUDE.md#claude-code-otlp-configuration).
 
 ## Canonical database path
 
@@ -27,15 +28,19 @@ Readers (e.g. the macOS app) should open this path read-only. Override with `--d
 
 ## Schema (what readers can rely on)
 
-- **`usage_events`** — One row per request/snapshot: `id`, `source_app`, `source_confidence`, `timestamp`, `total_tokens`, `cost_usd`, `provider`, `model`, etc. No prompt or code content; only counts, cost, and metadata.
-- **`daily_usage_rollups`** — Pre-aggregated by `(day, source_app, provider, model)`: `total_tokens`, `total_cost_usd`, `exact_events`, `derived_events`, `estimated_events`.
-- **`session_summaries`** — Optional per-session summaries.
+- **`bronze_raw_payloads`** — Raw OTLP request bodies with `kind` (`metrics` / `logs` / `traces`) and `received_at`.
+- **`silver_metric_points`** — One row per OTLP metric data point (no filtering).
+- **`silver_log_records`** — One row per OTLP log record with promoted attributes for Claude Code (session, prompt, model, token counts, cost, etc.).
+- **`silver_span_records`** — One row per OTLP span.
+- **`usage_events`** — **Gold view** over `silver_log_records`. One row per log-derived usage event with:
+  - identity/metadata: `id` (from `session_id`), `terminal_type`, `body`, `event_name`, `event_timestamp`, `prompt_id`, `prompt`, `prompt_length`, `model`, `source_confidence`, `provider`, `received_at`
+  - usage: `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `total_tokens`, `cost_usd`, `duration`, `speed`
 
-Query helpers exported from the package: `getTodayTokenTotal`, `getTodayCostTotal`, `getHourlyTotals`, `getDailyTotals`, `getTodayConfidenceMix`. See `src/schema.ts` and `src/index.ts`.
+Readers (including the macOS app) should treat `usage_events` as the **only gold surface** and do their own rollups/aggregations on top.
 
 ## Privacy
 
-Only token counts, costs, and metadata are stored. No prompt text, code snippets, or PII beyond what the upstream telemetry exposes (e.g. session IDs). Redaction is applied before persistence.
+Only token counts, costs, and metadata are intended to be stored long term. The current log-derived `usage_events` view may expose log body/prompt fields for debugging; the macOS app can decide how much of that to surface and may filter/redact further.
 
 ## Install and run
 
@@ -70,33 +75,12 @@ rm ~/Library/LaunchAgents/com.tokenbar.collector.plist
 
 The plist sets `RunAtLoad: true` and `KeepAlive: true` so the collector starts on login and restarts if it exits.
 
-## Adapter SDK
-
-To add another telemetry source, implement the `UsageAdapter` contract in `src/adapters/types.ts`: `id`, `name`, `confidence`, `detect()`, `sync(since?)`, `health()`. Map your data to the canonical `UsageEvent` type and use `insertUsageEvents()` from `src/schema.ts`. See `src/adapters/claude-code.ts` for the reference implementation.
-
 ## Commands
 
 | Command | Description |
 |--------|-------------|
 | `listen` | Start HTTP collector (default DB: canonical path; default port 4318). |
-| `sync-fixture` | Load fixture OTLP file into DB (for testing). |
-| `replay-fixture` | POST fixture payloads to a running listener. |
-| `configure-claude` | Write OTLP env vars to `~/.claude/settings.json` so Claude Code sends metrics to the collector. |
-| `export` | Export events to stdout: `--format csv|json` (default json), optional `--days <n>`, `--db <path>`. |
+| `configure-claude` | Write OTLP env vars to `~/.claude/settings.json` so Claude Code sends metrics/logs/traces to the collector. |
+| `inspect` | Show bronze/silver counts and a gold (`usage_events`) summary, with optional sample rows. |
 
 See [CLAUDE.md](CLAUDE.md) for dev commands and constraints.
-
-## End-to-end smoke test (Issue 5.1)
-
-To validate the full path from Claude Code request to menu bar UI:
-
-1. **Start the collector** (default DB: `~/Library/Application Support/TokenBar/tokenbar.db`):
-   ```bash
-   node dist/tokenbar-collector.js listen
-   ```
-2. **Configure Claude Code** (if not already): `node dist/tokenbar-collector.js configure-claude`. Restart Claude Code so it sends OTLP to `http://127.0.0.1:4318/v1/metrics`.
-3. **Start the TokenBar macOS app** (from the sibling `tokenbar-macos` repo). The menu bar pill shows "—" until the DB has data.
-4. **Make a real Claude Code request** (e.g. run a command or ask a question in Claude Code).
-5. **Verify:** Within about 10 seconds the pill should update with token count or cost; opening the popover shows the today chart, 7d mini chart, and confidence badge ("Exact" for Claude Code). Collector logs show ingestion; `GET http://127.0.0.1:4318/health` reflects activity.
-
-**Observed latency:** The macOS app polls the DB every 5 seconds, so the pill may lag 0–5 s after the collector writes. OTLP delivery from Claude Code is typically within 1–2 s of the request completing. End-to-end (request done → pill updated) is usually under 10 s.
