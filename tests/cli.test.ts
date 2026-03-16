@@ -9,11 +9,7 @@ describe("cli configure-claude", () => {
 
   afterEach(() => {
     if (tmpDir) {
-      try {
-        rmSync(tmpDir, { recursive: true });
-      } catch {
-        // ignore
-      }
+      try { rmSync(tmpDir, { recursive: true }); } catch { /* ignore */ }
     }
   });
 

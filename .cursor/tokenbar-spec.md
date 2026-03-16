@@ -210,7 +210,59 @@ This architecture matches the real telemetry situation because data comes from u
 
 ## 9. Core data model
 
-### Canonical event schema
+### Storage model (bronze → silver → gold)
+
+The implementation in `tokenbar-core` follows a medallion-style pattern:
+
+- **Bronze (raw)** — `bronze_raw_payloads`
+  - One row per HTTP POST into the collector.
+  - Columns: `id`, `kind` (`metrics` | `logs` | `traces`), `received_at`, `body` (raw OTLP JSON).
+- **Silver (normalized OTLP)** — `silver_metric_points`, `silver_log_records`, `silver_span_records`
+  - `silver_metric_points`: one row per OTLP metric data point (`metric_name`, `time_unix_nano`, `value`, `session_id`, `prompt_id`, `model`, `token_type`, etc.).
+  - `silver_log_records`: one row per OTLP log record with promoted attributes for Claude Code (`session_id`, `prompt_id`, `prompt`, `prompt_length`, `model`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `cost_usd`, `duration_ms`, `service_name`, etc.).
+  - `silver_span_records`: one row per OTLP span (`trace_id`, `span_id`, `name`, timing, `service_name`, `session_id`, etc.).
+- **Gold (what the macOS app reads)** — `usage_events` (SQLite VIEW)
+  - Derived purely from `silver_log_records`.
+  - One row per log-derived usage event, with a schema tailored to what the app needs for charts and pills.
+
+Concretely, the **`usage_events`** view currently exposes:
+
+```ts
+usage_events {
+  // identity / metadata
+  id: string                  // derived from silver_log_records.session_id
+  terminal_type: string | null
+  body: string | null
+  event_name: string | null
+  event_timestamp: datetime | null
+
+  prompt_id: string | null
+  prompt: string | null
+  prompt_length: integer | null
+  model: string | null
+
+  source_confidence: "exact" | "derived"
+  provider: string | null     // "anthropic" for Claude Code, else null
+
+  // usage
+  input_tokens: integer | null
+  output_tokens: integer | null
+  cache_read_tokens: integer | null
+  cache_creation_tokens: integer | null
+  total_tokens: integer       // sum of token fields with null treated as 0
+  cost_usd: decimal | null
+  duration: integer | null    // derived from duration_ms
+  speed: string | null
+
+  received_at: datetime       // when the underlying log was ingested
+}
+```
+
+For the Claude Code integration, this log-derived gold view is the **only surface the macOS app should read**; the app is responsible for rollups (daily, weekly, by model/source) on top of `usage_events`.
+
+### Conceptual event schema (for adapters)
+
+For thinking about adapters and future sources, it is still useful to keep a conceptual `UsageEvent` model. This is not necessarily a 1:1 mapping to a physical SQLite table, but describes the shape of a “normalized usage event”:
 
 ```ts
 UsageEvent {
@@ -247,41 +299,7 @@ UsageEvent {
 }
 ```
 
-
-### Notes
-
-Claude Code officially exposes telemetry fields that support a schema like this, including request-level token counts, cost usage, session IDs, prompt IDs, model, and terminal metadata. [page:5]
-That makes it the best source to define the canonical model around. [page:5]
-
-### Rollup tables
-
-```ts
-DailyUsageRollup {
-  day: date
-  source_app: string
-  provider: string | null
-  model: string | null
-  total_tokens: integer
-  total_cost_usd: decimal
-  exact_events: integer
-  derived_events: integer
-  estimated_events: integer
-}
-```
-
-```ts
-SessionSummary {
-  session_id: string
-  source_app: string
-  started_at: datetime
-  ended_at: datetime
-  repo_path: string | null
-  git_branch: string | null
-  total_tokens: integer | null
-  total_cost_usd: decimal | null
-  confidence: string
-}
-```
+Adapters should aim to be able to express their data in this shape conceptually, but the concrete storage for Claude Code today is the **log-derived `usage_events` view** described above. Additional rollup tables (`DailyUsageRollup`, `SessionSummary`, etc.) are the responsibility of the macOS app or future layers, not the current `tokenbar-core` implementation.
 
 
 ---

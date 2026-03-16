@@ -1,23 +1,25 @@
+import { execSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { ClaudeCodeAdapter, readFixturePayloads } from "./adapters/claude-code.js";
 import { startCollectorListener } from "./collector/listener.js";
-import { syncAdapterIntoDatabase } from "./collector/runtime.js";
 import { defaultDbPath, getUsageSummary, initializeDatabase } from "./schema.js";
-
-const DEFAULT_FIXTURE_PATH = resolve(process.cwd(), "fixtures/mock-otlp-payload.json");
-const DEFAULT_LISTENER_ENDPOINT = "http://127.0.0.1:4318/v1/metrics";
 
 /** Default Claude Code settings path. Override with --settings for tests. */
 export const DEFAULT_CLAUDE_SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
 
-/** Env vars Claude Code uses to send OTLP metrics to our HTTP listener (JSON). */
 const OTLP_ENV = {
   CLAUDE_CODE_ENABLE_TELEMETRY: "1",
   OTEL_METRICS_EXPORTER: "otlp",
   OTEL_EXPORTER_OTLP_PROTOCOL: "http/json",
   OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://127.0.0.1:4318/v1/metrics",
+  OTEL_LOGS_EXPORTER: "otlp",
+  OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://127.0.0.1:4318/v1/logs",
+  OTEL_TRACES_EXPORTER: "otlp",
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://127.0.0.1:4318/v1/traces",
+  OTEL_LOG_USER_PROMPTS: "1",
+  OTEL_LOG_TOOL_DETAILS: "1",
 };
 
 function getOption(args: string[], name: string): string | undefined {
@@ -30,6 +32,20 @@ function ensureParentDirectory(filePath: string): void {
   mkdirSync(dirname(filePath), { recursive: true });
 }
 
+function killProcessOnPort(port: number): void {
+  if (process.platform === "win32") return;
+  try {
+    const out = execSync(`lsof -ti :${port}`, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+    const pids = out.trim().split(/\s+/).filter(Boolean);
+    for (const pid of pids) {
+      try {
+        execSync(`kill ${pid}`, { stdio: "pipe" });
+        console.log(`[cli] killed process ${pid} on port ${port}`);
+      } catch { /* process may have exited */ }
+    }
+  } catch { /* port is free */ }
+}
+
 async function runListen(args: string[]): Promise<void> {
   const dbPath = getOption(args, "--db") ? resolve(process.cwd(), getOption(args, "--db")!) : defaultDbPath();
   const host = getOption(args, "--host") ?? "127.0.0.1";
@@ -38,6 +54,7 @@ async function runListen(args: string[]): Promise<void> {
     throw new Error("Invalid --port value");
   }
 
+  killProcessOnPort(port);
   ensureParentDirectory(dbPath);
   const listener = await startCollectorListener({ dbPath, host, port });
   console.log(`[cli] DB: ${dbPath}`);
@@ -48,57 +65,62 @@ async function runListen(args: string[]): Promise<void> {
     await listener.close();
     process.exit(0);
   };
-
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 }
 
-async function runSyncFixture(args: string[]): Promise<void> {
+function runInspect(args: string[]): void {
   const dbPath = getOption(args, "--db") ? resolve(process.cwd(), getOption(args, "--db")!) : defaultDbPath();
-  const fixturePath = resolve(process.cwd(), getOption(args, "--fixture") ?? DEFAULT_FIXTURE_PATH);
-  ensureParentDirectory(dbPath);
+  const sample = args.includes("--sample");
+
+  if (!existsSync(dbPath)) {
+    console.log(`[cli] DB not found: ${dbPath}`);
+    console.log("Start the collector (listen) and use Claude Code to ingest data first.");
+    return;
+  }
 
   const db = initializeDatabase(dbPath);
-  const adapter = new ClaudeCodeAdapter({ sourcePath: fixturePath });
-  if (!(await adapter.detect())) {
-    throw new Error(`Fixture file not found: ${fixturePath}`);
+
+  console.log(`DB: ${dbPath}\n`);
+
+  const bronzeCount = db.prepare("SELECT kind, COUNT(*) as c FROM bronze_raw_payloads GROUP BY kind").all() as { kind: string; c: number }[];
+  const bronzeTotal = bronzeCount.reduce((s, r) => s + r.c, 0);
+  console.log("Bronze (bronze_raw_payloads):");
+  if (bronzeTotal === 0) console.log("  (empty)");
+  else {
+    for (const r of bronzeCount) console.log(`  ${r.kind}: ${r.c}`);
+    console.log(`  total: ${bronzeTotal}`);
   }
 
-  const result = await syncAdapterIntoDatabase(db, adapter);
-  const health = await adapter.health();
-  const summary = getUsageSummary(db);
+  const silverMetrics = (db.prepare("SELECT COUNT(*) as c FROM silver_metric_points").get() as { c: number }).c;
+  const silverLogs = (db.prepare("SELECT COUNT(*) as c FROM silver_log_records").get() as { c: number }).c;
+  const silverSpans = (db.prepare("SELECT COUNT(*) as c FROM silver_span_records").get() as { c: number }).c;
+  console.log("\nSilver:");
+  console.log(`  silver_metric_points: ${silverMetrics}`);
+  console.log(`  silver_log_records:  ${silverLogs}`);
+  console.log(`  silver_span_records: ${silverSpans}`);
 
-  console.log(`[cli] synced adapter=${result.adapter_id} inserted=${result.inserted}`);
-  console.log(`[cli] health status=${health.status} details=${health.details}`);
-  console.log(`[cli] events=${summary.events} total_tokens=${summary.total_tokens} total_cost_usd=${summary.total_cost_usd.toFixed(6)}`);
+  const gold = getUsageSummary(db);
+  console.log("\nGold (usage_events):");
+  console.log(`  events: ${gold.events}, total_tokens: ${gold.total_tokens}, total_cost_usd: ${gold.total_cost_usd.toFixed(6)}`);
+
+  if (sample && (bronzeTotal > 0 || silverMetrics > 0 || silverLogs > 0 || silverSpans > 0 || gold.events > 0)) {
+    console.log("\n--- Sample rows (last 2 per table) ---");
+    if (bronzeTotal > 0) {
+      const rows = db.prepare("SELECT id, kind, received_at, length(body) as body_len FROM bronze_raw_payloads ORDER BY id DESC LIMIT 2").all();
+      console.log("\nbronze_raw_payloads:", JSON.stringify(rows, null, 2));
+    }
+    if (silverMetrics > 0) {
+      const rows = db.prepare("SELECT id, bronze_id, metric_name, session_id, model, token_type, value FROM silver_metric_points ORDER BY time_unix_nano DESC LIMIT 2").all();
+      console.log("\nsilver_metric_points:", JSON.stringify(rows, null, 2));
+    }
+    if (gold.events > 0) {
+      const rows = db.prepare("SELECT id, timestamp, model, input_tokens, output_tokens, cost_usd FROM usage_events ORDER BY timestamp DESC LIMIT 2").all();
+      console.log("\nusage_events:", JSON.stringify(rows, null, 2));
+    }
+  }
 
   db.close();
-}
-
-async function runReplayFixture(args: string[]): Promise<void> {
-  const fixturePath = resolve(process.cwd(), getOption(args, "--fixture") ?? DEFAULT_FIXTURE_PATH);
-  const endpoint = getOption(args, "--endpoint") ?? DEFAULT_LISTENER_ENDPOINT;
-  const payloads = readFixturePayloads(fixturePath);
-  if (payloads.length === 0) {
-    throw new Error(`No OTLP payloads found in ${fixturePath}`);
-  }
-
-  let inserted = 0;
-  for (const payload of payloads) {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) {
-      throw new Error(`Listener request failed: ${response.status} ${response.statusText}`);
-    }
-
-    const body = await response.json() as { inserted?: number };
-    inserted += body.inserted ?? 0;
-  }
-
-  console.log(`[cli] replayed payloads=${payloads.length} inserted_events=${inserted}`);
 }
 
 function runConfigureClaude(args: string[]): void {
@@ -113,9 +135,7 @@ function runConfigureClaude(args: string[]): void {
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       settings = parsed as Record<string, unknown>;
     }
-  } catch {
-    // File missing or invalid JSON — start fresh
-  }
+  } catch { /* file missing or invalid JSON — start fresh */ }
 
   const env = (settings.env && typeof settings.env === "object" && !Array.isArray(settings.env))
     ? (settings.env as Record<string, string>)
@@ -136,29 +156,25 @@ function runConfigureClaude(args: string[]): void {
 
 async function main(): Promise<void> {
   const [command = "help", ...args] = process.argv.slice(2);
+
   if (command === "listen") {
     await runListen(args);
-    return;
-  }
-  if (command === "sync-fixture") {
-    await runSyncFixture(args);
-    return;
-  }
-  if (command === "replay-fixture") {
-    await runReplayFixture(args);
     return;
   }
   if (command === "configure-claude") {
     runConfigureClaude(args);
     return;
   }
+  if (command === "inspect") {
+    runInspect(args);
+    return;
+  }
 
   console.log("TokenBar core CLI");
   console.log("Commands:");
   console.log("  listen [--db <path>] [--host <host>] [--port <port>]");
-  console.log("  sync-fixture [--db <path>] [--fixture <path>]");
-  console.log("  replay-fixture [--fixture <path>] [--endpoint <url>]");
   console.log("  configure-claude [--settings <path>]");
+  console.log("  inspect [--db <path>] [--sample]   Inspect bronze/silver/gold row counts (optional sample rows)");
 }
 
 void main();

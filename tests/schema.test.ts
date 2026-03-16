@@ -2,15 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import {
   defaultDbPath,
-  getDailyTotals,
-  getHourlyTotals,
-  getTodayConfidenceMix,
-  getTodayCostTotal,
-  initializeDatabase,
-  insertUsageEvent,
-  insertUsageEvents,
   getEventCount,
-  type UsageEvent,
+  getUsageSummary,
+  initializeDatabase,
+  insertBronzeRawPayload,
+  insertRows,
+  type SilverLogRecord,
+  type SilverMetricPoint,
+  type SilverSpanRecord,
 } from "../src/schema.js";
 
 describe("schema", () => {
@@ -28,450 +27,275 @@ describe("schema", () => {
     const path = defaultDbPath();
     expect(path).toContain("TokenBar");
     expect(path).toContain("tokenbar.db");
-    expect(path).toMatch(/\.db$/);
   });
 
-  it("EXPLAIN QUERY PLAN uses index for timestamp range (date-equivalent)", () => {
-    const plan = db.prepare(
-      "EXPLAIN QUERY PLAN SELECT * FROM usage_events WHERE timestamp >= '2026-03-15' AND timestamp < '2026-03-16'",
-    ).all() as { detail: string }[];
-    const detail = plan.map((p) => p.detail).join(" ");
-    expect(detail).toMatch(/idx_usage_events/);
-  });
-
-  it("creates tables on initialization", () => {
+  it("creates usage_events view and bronze/silver tables on initialization", () => {
     const tables = db
-      .prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
-      )
-      .all() as { name: string }[];
+      .prepare("SELECT name, type FROM sqlite_master WHERE type IN ('table','view') ORDER BY name")
+      .all() as { name: string; type: string }[];
     const names = tables.map((t) => t.name);
+    expect(names).toContain("bronze_raw_payloads");
+    expect(names).toContain("silver_metric_points");
+    expect(names).toContain("silver_log_records");
+    expect(names).toContain("silver_span_records");
     expect(names).toContain("usage_events");
-    expect(names).toContain("daily_usage_rollups");
-    expect(names).toContain("session_summaries");
+    const usageEventsRow = tables.find((t) => t.name === "usage_events");
+    expect(usageEventsRow?.type).toBe("view");
   });
 
-  it("inserts and retrieves a usage event", () => {
-    const event: UsageEvent = {
-      id: "test-001",
-      source_app: "claude_code",
-      source_kind: "cli",
-      source_confidence: "exact",
-      event_type: "api_request",
-      timestamp: new Date().toISOString(),
-      provider: "anthropic",
+  it("insertBronzeRawPayload returns inserted row id", () => {
+    const id = insertBronzeRawPayload(db, "metrics", '{"resourceMetrics":[]}');
+    expect(id).toBe(1);
+    const row = db.prepare("SELECT * FROM bronze_raw_payloads WHERE id = ?").get(1) as { kind: string; body: string };
+    expect(row.kind).toBe("metrics");
+    expect(row.body).toBe('{"resourceMetrics":[]}');
+  });
+
+  it("insertRows silver_metric_points round-trip", () => {
+    const bronzeId = insertBronzeRawPayload(db, "metrics", "{}");
+    const receivedAt = new Date().toISOString();
+    const points: SilverMetricPoint[] = [
+      {
+        id: "silver-metric-1",
+        bronze_id: bronzeId,
+        received_at: receivedAt,
+        metric_name: "test.metric",
+        time_unix_nano: 1000,
+        start_time_unix_nano: 999,
+        value: 42,
+        service_name: "test",
+        service_version: "1.0",
+        scope_name: "scope",
+        session_id: "s1",
+        prompt_id: "p1",
+        user_id: null,
+        organization_id: null,
+        terminal_type: "cursor",
+        model: "claude-4",
+        token_type: "input",
+        extra_attributes_json: null,
+      },
+    ];
+    insertRows(db, "silver_metric_points", points);
+    const row = db.prepare("SELECT * FROM silver_metric_points WHERE id = ?").get("silver-metric-1") as Record<string, unknown>;
+    expect(row.metric_name).toBe("test.metric");
+    expect(row.value).toBe(42);
+    expect(row.session_id).toBe("s1");
+  });
+
+  it("insertRows silver_log_records round-trip", () => {
+    const bronzeId = insertBronzeRawPayload(db, "logs", "{}");
+    const receivedAt = new Date().toISOString();
+    const records: SilverLogRecord[] = [
+      {
+        id: "silver-log-1",
+        bronze_id: bronzeId,
+        received_at: receivedAt,
+        time_unix_nano: 2000,
+        severity_number: 9,
+        severity_text: "INFO",
+        body: "hello",
+        trace_id: null,
+        span_id: null,
+        service_name: "svc",
+        session_id: "s2",
+        user_id: null,
+        organization_id: null,
+        user_email: null,
+        user_account_uuid: null,
+        user_account_id: null,
+        terminal_type: null,
+        event_name: null,
+        event_timestamp: null,
+        event_sequence: null,
+        prompt_id: null,
+        prompt: null,
+        prompt_length: null,
+        model: null,
+        input_tokens: null,
+        output_tokens: null,
+        cache_read_tokens: null,
+        cache_creation_tokens: null,
+        cost_usd: null,
+        duration_ms: null,
+        speed: null,
+        extra_attributes_json: null,
+      },
+    ];
+    insertRows(db, "silver_log_records", records);
+    const row = db.prepare("SELECT * FROM silver_log_records WHERE id = ?").get("silver-log-1") as Record<string, unknown>;
+    expect(row.body).toBe("hello");
+    expect(row.severity_text).toBe("INFO");
+  });
+
+  it("insertRows silver_span_records round-trip", () => {
+    const bronzeId = insertBronzeRawPayload(db, "traces", "{}");
+    const receivedAt = new Date().toISOString();
+    const records: SilverSpanRecord[] = [
+      {
+        id: "silver-span-1",
+        bronze_id: bronzeId,
+        received_at: receivedAt,
+        trace_id: "trace1",
+        span_id: "span1",
+        parent_span_id: null,
+        name: "request",
+        kind: 1,
+        start_time_unix_nano: 1000,
+        end_time_unix_nano: 2000,
+        status_code: 1,
+        service_name: "svc",
+        session_id: "s3",
+        extra_attributes_json: null,
+      },
+    ];
+    insertRows(db, "silver_span_records", records);
+    const row = db.prepare("SELECT * FROM silver_span_records WHERE id = ?").get("silver-span-1") as Record<string, unknown>;
+    expect(row.name).toBe("request");
+    expect(row.trace_id).toBe("trace1");
+  });
+
+  it("usage_events view can be queried", () => {
+    const rows = db.prepare("SELECT * FROM usage_events LIMIT 1").all();
+    expect(Array.isArray(rows)).toBe(true);
+  });
+
+  it("gold view surfaces tokens and cost from silver_log_records", () => {
+    const bronzeId = insertBronzeRawPayload(db, "logs", "{}");
+    const receivedAt = new Date().toISOString();
+    const record: SilverLogRecord = {
+      id: "gold-log-1",
+      bronze_id: bronzeId,
+      received_at: receivedAt,
+      time_unix_nano: 1_700_000_000_000_000_000,
+      severity_number: null,
+      severity_text: null,
+      body: "example body",
+      trace_id: null,
+      span_id: null,
+      service_name: "claude-code",
+      session_id: "sess-1",
+      user_id: null,
+      organization_id: null,
+      user_email: null,
+      user_account_uuid: null,
+      user_account_id: null,
+      terminal_type: "cursor",
+      event_name: "completion",
+      event_timestamp: receivedAt,
+      event_sequence: 1,
+      prompt_id: "prompt-1",
+      prompt: "example prompt",
+      prompt_length: 10,
       model: "claude-sonnet-4-6",
-      session_id: "sess-001",
-      prompt_id: null,
       input_tokens: 100,
       output_tokens: 200,
-      cache_read_tokens: 5000,
-      cache_creation_tokens: 50,
-      total_tokens: 5350,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
       cost_usd: 0.0049,
-      currency: "USD",
-      terminal_type: "cursor",
-      repo_path: null,
-      git_branch: null,
-      project_name: null,
-      raw_ref: null,
-      redaction_state: "none",
-      imported_at: new Date().toISOString(),
+      duration_ms: 1234,
+      speed: "fast",
+      extra_attributes_json: null,
     };
+    insertRows(db, "silver_log_records", [record]);
 
-    insertUsageEvent(db, event);
     expect(getEventCount(db)).toBe(1);
-
-    const row = db
-      .prepare("SELECT * FROM usage_events WHERE id = ?")
-      .get("test-001") as Record<string, unknown>;
-    expect(row.source_app).toBe("claude_code");
+    const row = db.prepare("SELECT * FROM usage_events").get() as Record<string, unknown>;
+    expect(row.id).toBe("sess-1");
     expect(row.model).toBe("claude-sonnet-4-6");
     expect(row.input_tokens).toBe(100);
-    expect(row.cost_usd).toBeCloseTo(0.0049);
+    expect(row.output_tokens).toBe(200);
+    expect(Number(row.cost_usd)).toBeCloseTo(0.0049);
   });
 
-  it("rollup: two events with model=null same day produce one rollup row with summed values", () => {
-    const day = "2026-03-15";
-    const base: Omit<UsageEvent, "id" | "timestamp" | "total_tokens" | "cost_usd" | "imported_at"> = {
-      source_app: "claude_code",
-      source_kind: "ide",
-      source_confidence: "exact",
-      event_type: "api_request",
-      provider: null,
-      model: null,
-      session_id: null,
-      prompt_id: null,
-      input_tokens: 10,
-      output_tokens: 20,
-      cache_read_tokens: null,
-      cache_creation_tokens: null,
-      cost_usd: null,
-      currency: null,
-      terminal_type: null,
-      repo_path: null,
-      git_branch: null,
-      project_name: null,
-      raw_ref: null,
-      redaction_state: "none",
-    };
-    const e1: UsageEvent = {
-      ...base,
-      id: "rollup-test-1",
-      timestamp: `${day}T10:00:00.000Z`,
-      total_tokens: 100,
-      cost_usd: 0.001,
-      imported_at: new Date().toISOString(),
-    };
-    const e2: UsageEvent = {
-      ...base,
-      id: "rollup-test-2",
-      timestamp: `${day}T14:00:00.000Z`,
-      total_tokens: 200,
-      cost_usd: 0.002,
-      imported_at: new Date().toISOString(),
-    };
-    insertUsageEvents(db, [e1, e2]);
-    const rows = db.prepare("SELECT * FROM daily_usage_rollups WHERE day = ?").all(day) as { day: string; total_tokens: number; total_cost_usd: number }[];
-    expect(rows).toHaveLength(1);
-    expect(rows[0].total_tokens).toBe(300);
-    expect(rows[0].total_cost_usd).toBeCloseTo(0.003);
+  it("insertRows with empty array is a no-op", () => {
+    insertRows(db, "silver_metric_points", []);
+    expect(getEventCount(db)).toBe(0);
   });
 
-  it("rollup: re-inserting same event does not double-count", () => {
-    const day = "2026-03-16";
-    const event: UsageEvent = {
-      id: "idempotent-1",
-      source_app: "claude_code",
-      source_kind: "ide",
-      source_confidence: "exact",
-      event_type: "api_request",
-      timestamp: `${day}T12:00:00.000Z`,
-      provider: "anthropic",
-      model: "claude-3",
-      session_id: null,
-      prompt_id: null,
-      input_tokens: 5,
-      output_tokens: 15,
-      cache_read_tokens: null,
-      cache_creation_tokens: null,
-      total_tokens: 20,
-      cost_usd: 0.0005,
-      currency: "USD",
-      terminal_type: null,
-      repo_path: null,
-      git_branch: null,
-      project_name: null,
-      raw_ref: null,
-      redaction_state: "none",
-      imported_at: new Date().toISOString(),
-    };
-    insertUsageEvents(db, [event]);
-    insertUsageEvents(db, [event]);
-    const row = db.prepare("SELECT total_tokens, total_cost_usd FROM daily_usage_rollups WHERE day = ?").get(day) as { total_tokens: number; total_cost_usd: number };
-    expect(row.total_tokens).toBe(20);
-    expect(row.total_cost_usd).toBeCloseTo(0.0005);
-  });
-
-  it("getTodayCostTotal returns sum of cost_usd for today", () => {
-    const today = new Date().toISOString().slice(0, 10);
-    insertUsageEvents(db, [
+  it("getUsageSummary returns aggregate stats from gold view", () => {
+    const bronzeId = insertBronzeRawPayload(db, "logs", "{}");
+    const receivedAt = new Date().toISOString();
+    const records: SilverLogRecord[] = [
       {
-        id: "cost-1",
-        source_app: "claude_code",
-        source_kind: "ide",
-        source_confidence: "exact",
-        event_type: "api_request",
-        timestamp: `${today}T12:00:00.000Z`,
-        provider: null,
-        model: null,
-        session_id: null,
-        prompt_id: null,
-        input_tokens: 1,
-        output_tokens: 2,
-        cache_read_tokens: null,
-        cache_creation_tokens: null,
-        total_tokens: 3,
-        cost_usd: 0.01,
-        currency: "USD",
+        id: "sum-log-1",
+        bronze_id: bronzeId,
+        received_at: receivedAt,
+        time_unix_nano: 1000,
+        severity_number: null,
+        severity_text: null,
+        body: null,
+        trace_id: null,
+        span_id: null,
+        service_name: "claude-code",
+        session_id: "a",
+        user_id: null,
+        organization_id: null,
+        user_email: null,
+        user_account_uuid: null,
+        user_account_id: null,
         terminal_type: null,
-        repo_path: null,
-        git_branch: null,
-        project_name: null,
-        raw_ref: null,
-        redaction_state: "none",
-        imported_at: new Date().toISOString(),
-      },
-      {
-        id: "cost-2",
-        source_app: "claude_code",
-        source_kind: "ide",
-        source_confidence: "exact",
-        event_type: "api_request",
-        timestamp: `${today}T14:00:00.000Z`,
-        provider: null,
-        model: null,
-        session_id: null,
-        prompt_id: null,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: null,
-        cache_creation_tokens: null,
-        total_tokens: 0,
-        cost_usd: 0.005,
-        currency: "USD",
-        terminal_type: null,
-        repo_path: null,
-        git_branch: null,
-        project_name: null,
-        raw_ref: null,
-        redaction_state: "none",
-        imported_at: new Date().toISOString(),
-      },
-    ]);
-    expect(getTodayCostTotal(db)).toBeCloseTo(0.015);
-  });
-
-  it("getTodayCostTotal returns 0 for empty DB", () => {
-    expect(getTodayCostTotal(db)).toBe(0);
-  });
-
-  it("getHourlyTotals returns 24 buckets for date; empty hours are 0", () => {
-    const day = "2026-03-20";
-    insertUsageEvents(db, [
-      {
-        id: "h1",
-        source_app: "claude_code",
-        source_kind: "ide",
-        source_confidence: "exact",
-        event_type: "api_request",
-        timestamp: `${day}T10:00:00.000Z`,
-        provider: null,
-        model: null,
-        session_id: null,
-        prompt_id: null,
+        event_name: null,
+        event_timestamp: receivedAt,
+        event_sequence: 1,
+        prompt_id: "p1",
+        prompt: null,
+        prompt_length: null,
+        model: "m",
         input_tokens: 10,
         output_tokens: 20,
-        cache_read_tokens: null,
-        cache_creation_tokens: null,
-        total_tokens: 30,
-        cost_usd: 0.001,
-        currency: "USD",
-        terminal_type: null,
-        repo_path: null,
-        git_branch: null,
-        project_name: null,
-        raw_ref: null,
-        redaction_state: "none",
-        imported_at: new Date().toISOString(),
-      },
-      {
-        id: "h2",
-        source_app: "claude_code",
-        source_kind: "ide",
-        source_confidence: "exact",
-        event_type: "api_request",
-        timestamp: `${day}T10:30:00.000Z`,
-        provider: null,
-        model: null,
-        session_id: null,
-        prompt_id: null,
-        input_tokens: 5,
-        output_tokens: 5,
-        cache_read_tokens: null,
-        cache_creation_tokens: null,
-        total_tokens: 10,
-        cost_usd: 0.0005,
-        currency: "USD",
-        terminal_type: null,
-        repo_path: null,
-        git_branch: null,
-        project_name: null,
-        raw_ref: null,
-        redaction_state: "none",
-        imported_at: new Date().toISOString(),
-      },
-    ]);
-    const hourly = getHourlyTotals(db, day);
-    expect(hourly).toHaveLength(24);
-    const hour10 = hourly.find((r) => r.hour === 10);
-    expect(hour10?.tokens).toBe(40);
-    expect(hour10?.cost_usd).toBeCloseTo(0.0015);
-    const hour0 = hourly.find((r) => r.hour === 0);
-    expect(hour0?.tokens).toBe(0);
-    expect(hour0?.cost_usd).toBe(0);
-  });
-
-  it("getHourlyTotals returns 24 zero buckets for date with no events", () => {
-    const hourly = getHourlyTotals(db, "2026-03-21");
-    expect(hourly).toHaveLength(24);
-    expect(hourly.every((r) => r.tokens === 0 && r.cost_usd === 0)).toBe(true);
-  });
-
-  it("getDailyTotals returns at most days rows sorted ascending", () => {
-    const today = new Date().toISOString().slice(0, 10);
-    insertUsageEvents(db, [
-      {
-        id: "d1",
-        source_app: "claude_code",
-        source_kind: "ide",
-        source_confidence: "exact",
-        event_type: "api_request",
-        timestamp: `${today}T12:00:00.000Z`,
-        provider: null,
-        model: null,
-        session_id: null,
-        prompt_id: null,
-        input_tokens: 100,
-        output_tokens: 200,
-        cache_read_tokens: null,
-        cache_creation_tokens: null,
-        total_tokens: 300,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
         cost_usd: 0.01,
-        currency: "USD",
-        terminal_type: null,
-        repo_path: null,
-        git_branch: null,
-        project_name: null,
-        raw_ref: null,
-        redaction_state: "none",
-        imported_at: new Date().toISOString(),
-      },
-    ]);
-    const daily = getDailyTotals(db, 7);
-    expect(daily.length).toBeLessThanOrEqual(7);
-    const sorted = [...daily].sort((a, b) => a.day.localeCompare(b.day));
-    expect(daily.map((r) => r.day)).toEqual(sorted.map((r) => r.day));
-    const row = daily.find((r) => r.day === today);
-    expect(row).toBeDefined();
-    expect(row!.tokens).toBe(300);
-    expect(row!.cost_usd).toBeCloseTo(0.01);
-  });
-
-  it("getDailyTotals returns empty array for empty DB", () => {
-    expect(getDailyTotals(db, 7)).toEqual([]);
-  });
-
-  it("getTodayConfidenceMix returns counts by confidence for today", () => {
-    const today = new Date().toISOString().slice(0, 10);
-    insertUsageEvents(db, [
-      {
-        id: "c1",
-        source_app: "claude_code",
-        source_kind: "ide",
-        source_confidence: "exact",
-        event_type: "api_request",
-        timestamp: `${today}T12:00:00.000Z`,
-        provider: null,
-        model: null,
-        session_id: null,
-        prompt_id: null,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: null,
-        cache_creation_tokens: null,
-        total_tokens: 0,
-        cost_usd: 0,
-        currency: null,
-        terminal_type: null,
-        repo_path: null,
-        git_branch: null,
-        project_name: null,
-        raw_ref: null,
-        redaction_state: "none",
-        imported_at: new Date().toISOString(),
+        duration_ms: null,
+        speed: null,
+        extra_attributes_json: null,
       },
       {
-        id: "c2",
-        source_app: "claude_code",
-        source_kind: "ide",
-        source_confidence: "exact",
-        event_type: "api_request",
-        timestamp: `${today}T13:00:00.000Z`,
-        provider: null,
-        model: null,
-        session_id: null,
-        prompt_id: null,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: null,
-        cache_creation_tokens: null,
-        total_tokens: 0,
-        cost_usd: 0,
-        currency: null,
+        id: "sum-log-2",
+        bronze_id: bronzeId,
+        received_at: receivedAt,
+        time_unix_nano: 2000,
+        severity_number: null,
+        severity_text: null,
+        body: null,
+        trace_id: null,
+        span_id: null,
+        service_name: "claude-code",
+        session_id: "c",
+        user_id: null,
+        organization_id: null,
+        user_email: null,
+        user_account_uuid: null,
+        user_account_id: null,
         terminal_type: null,
-        repo_path: null,
-        git_branch: null,
-        project_name: null,
-        raw_ref: null,
-        redaction_state: "none",
-        imported_at: new Date().toISOString(),
+        event_name: null,
+        event_timestamp: receivedAt,
+        event_sequence: 2,
+        prompt_id: "p2",
+        prompt: null,
+        prompt_length: null,
+        model: "m",
+        input_tokens: 5,
+        output_tokens: 15,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        cost_usd: 0.005,
+        duration_ms: null,
+        speed: null,
+        extra_attributes_json: null,
       },
-      {
-        id: "c3",
-        source_app: "cursor",
-        source_kind: "ide",
-        source_confidence: "derived",
-        event_type: "api_request",
-        timestamp: `${today}T14:00:00.000Z`,
-        provider: null,
-        model: null,
-        session_id: null,
-        prompt_id: null,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: null,
-        cache_creation_tokens: null,
-        total_tokens: 0,
-        cost_usd: 0,
-        currency: null,
-        terminal_type: null,
-        repo_path: null,
-        git_branch: null,
-        project_name: null,
-        raw_ref: null,
-        redaction_state: "none",
-        imported_at: new Date().toISOString(),
-      },
-    ]);
-    const mix = getTodayConfidenceMix(db);
-    expect(mix.exact).toBe(2);
-    expect(mix.derived).toBe(1);
-    expect(mix.estimated).toBe(0);
+    ];
+    insertRows(db, "silver_log_records", records);
+
+    const summary = getUsageSummary(db);
+    expect(summary.events).toBe(2);
+    expect(summary.total_tokens).toBe(50);
+    expect(summary.total_cost_usd).toBeCloseTo(0.015);
   });
 
-  it("getTodayConfidenceMix returns zeros for empty DB", () => {
-    expect(getTodayConfidenceMix(db)).toEqual({ exact: 0, derived: 0, estimated: 0 });
-  });
-
-  it("enforces source_confidence constraint", () => {
-    const badEvent: UsageEvent = {
-      id: "test-bad",
-      source_app: "claude_code",
-      source_kind: "cli",
-      source_confidence: "invalid" as UsageEvent["source_confidence"],
-      event_type: "api_request",
-      timestamp: new Date().toISOString(),
-      provider: null,
-      model: null,
-      session_id: null,
-      prompt_id: null,
-      input_tokens: null,
-      output_tokens: null,
-      cache_read_tokens: null,
-      cache_creation_tokens: null,
-      total_tokens: null,
-      cost_usd: null,
-      currency: null,
-      terminal_type: null,
-      repo_path: null,
-      git_branch: null,
-      project_name: null,
-      raw_ref: null,
-      redaction_state: "none",
-      imported_at: new Date().toISOString(),
-    };
-
-    expect(() => insertUsageEvent(db, badEvent)).toThrow();
+  it("getUsageSummary returns zeros for empty DB", () => {
+    const summary = getUsageSummary(db);
+    expect(summary).toEqual({ events: 0, total_tokens: 0, total_cost_usd: 0 });
   });
 });

@@ -29,6 +29,8 @@ export interface UsageEvent {
   cost_usd: number | null;
   currency: string | null;
 
+  active_time_seconds: number | null;
+
   terminal_type: string | null;
   repo_path: string | null;
   git_branch: string | null;
@@ -39,67 +41,202 @@ export interface UsageEvent {
   imported_at: string;
 }
 
-const CREATE_USAGE_EVENTS_TABLE = `
-CREATE TABLE IF NOT EXISTS usage_events (
+/** Gold: VIEW over silver_metric_points (pivot by session_id, prompt_id, model, time_unix_nano). */
+const CREATE_USAGE_EVENTS_VIEW = `
+CREATE VIEW usage_events AS
+SELECT
+  session_id AS id,
+  terminal_type,
+  body,
+  event_name,
+  event_timestamp,
+
+  prompt_id,
+  prompt,
+  prompt_length,
+  model,
+
+  CASE WHEN service_name = 'claude-code' THEN 'exact' ELSE 'derived' END AS source_confidence,
+  CASE WHEN service_name = 'claude-code' THEN 'anthropic' ELSE NULL END AS provider,
+
+  input_tokens,
+  output_tokens,
+  cache_read_tokens,
+  cache_creation_tokens,
+  coalesce(input_tokens, 0) + coalesce(output_tokens, 0) + coalesce(cache_read_tokens, 0) + coalesce(cache_creation_tokens, 0) AS total_tokens,
+  cost_usd,
+  duration_ms AS duration,
+  speed,
+
+  received_at
+
+  FROM silver_log_records
+
+`;
+
+/** Bronze layer: verbatim HTTP body per request. Never filtered. */
+const CREATE_BRONZE_RAW_PAYLOADS_TABLE = `
+CREATE TABLE IF NOT EXISTS bronze_raw_payloads (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL CHECK(kind IN ('metrics','logs','traces')),
+  received_at TEXT NOT NULL,
+  body TEXT NOT NULL
+);
+`;
+
+/** Silver layer: one row per OTLP metric data point. */
+export interface SilverMetricPoint {
+  id: string;
+  bronze_id: number;
+  received_at: string;
+  metric_name: string;
+  time_unix_nano: number;
+  start_time_unix_nano: number | null;
+  value: number;
+  service_name: string | null;
+  service_version: string | null;
+  scope_name: string | null;
+  session_id: string | null;
+  prompt_id: string | null;
+  user_id: string | null;
+  organization_id: string | null;
+  terminal_type: string | null;
+  model: string | null;
+  token_type: string | null;
+  extra_attributes_json: string | null;
+}
+
+const CREATE_SILVER_METRIC_POINTS_TABLE = `
+CREATE TABLE IF NOT EXISTS silver_metric_points (
   id TEXT PRIMARY KEY,
-  source_app TEXT NOT NULL CHECK(source_app IN ('claude_code','cursor','claude_desktop','other')),
-  source_kind TEXT NOT NULL CHECK(source_kind IN ('cli','ide','desktop','web','api')),
-  source_confidence TEXT NOT NULL CHECK(source_confidence IN ('exact','derived','estimated')),
-  event_type TEXT NOT NULL CHECK(event_type IN ('api_request','session_rollup','usage_snapshot','tool_result')),
-  timestamp TEXT NOT NULL,
-
-  provider TEXT,
-  model TEXT,
-
+  bronze_id INTEGER NOT NULL REFERENCES bronze_raw_payloads(id),
+  received_at TEXT NOT NULL,
+  metric_name TEXT NOT NULL,
+  time_unix_nano INTEGER NOT NULL,
+  start_time_unix_nano INTEGER,
+  value REAL NOT NULL,
+  service_name TEXT,
+  service_version TEXT,
+  scope_name TEXT,
   session_id TEXT,
   prompt_id TEXT,
+  user_id TEXT,
+  organization_id TEXT,
+  terminal_type TEXT,
+  model TEXT,
+  token_type TEXT,
+  extra_attributes_json TEXT
+);
+`;
 
+/** Silver layer: one row per OTLP log record. */
+export interface SilverLogRecord {
+  id: string;
+  bronze_id: number;
+  received_at: string;
+  time_unix_nano: number;
+  severity_number: number | null;
+  severity_text: string | null;
+  body: string | null;
+  trace_id: string | null;
+  span_id: string | null;
+  service_name: string | null;
+  session_id: string | null;
+  /** Promoted from attributes: user.id, organization.id, user.email, etc. */
+  user_id: string | null;
+  organization_id: string | null;
+  user_email: string | null;
+  user_account_uuid: string | null;
+  user_account_id: string | null;
+  terminal_type: string | null;
+  event_name: string | null;
+  event_timestamp: string | null;
+  event_sequence: number | null;
+  prompt_id: string | null;
+  prompt: string | null;
+  prompt_length: number | null;
+  model: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_creation_tokens: number | null;
+  cost_usd: number | null;
+  duration_ms: number | null;
+  speed: string | null;
+  extra_attributes_json: string | null;
+}
+
+const CREATE_SILVER_LOG_RECORDS_TABLE = `
+CREATE TABLE IF NOT EXISTS silver_log_records (
+  id TEXT PRIMARY KEY,
+  bronze_id INTEGER NOT NULL REFERENCES bronze_raw_payloads(id),
+  received_at TEXT NOT NULL,
+  time_unix_nano INTEGER NOT NULL,
+  severity_number INTEGER,
+  severity_text TEXT,
+  body TEXT,
+  trace_id TEXT,
+  span_id TEXT,
+  service_name TEXT,
+  session_id TEXT,
+  user_id TEXT,
+  organization_id TEXT,
+  user_email TEXT,
+  user_account_uuid TEXT,
+  user_account_id TEXT,
+  terminal_type TEXT,
+  event_name TEXT,
+  event_timestamp TEXT,
+  event_sequence INTEGER,
+  prompt_id TEXT,
+  prompt TEXT,
+  prompt_length INTEGER,
+  model TEXT,
   input_tokens INTEGER,
   output_tokens INTEGER,
   cache_read_tokens INTEGER,
   cache_creation_tokens INTEGER,
-  total_tokens INTEGER,
-
   cost_usd REAL,
-  currency TEXT,
-
-  terminal_type TEXT,
-  repo_path TEXT,
-  git_branch TEXT,
-  project_name TEXT,
-
-  raw_ref TEXT,
-  redaction_state TEXT NOT NULL DEFAULT 'none' CHECK(redaction_state IN ('none','partial','full')),
-  imported_at TEXT NOT NULL
+  duration_ms INTEGER,
+  speed TEXT,
+  extra_attributes_json TEXT
 );
 `;
 
-const CREATE_DAILY_ROLLUP_TABLE = `
-CREATE TABLE IF NOT EXISTS daily_usage_rollups (
-  day TEXT NOT NULL,
-  source_app TEXT NOT NULL,
-  provider TEXT NOT NULL DEFAULT '',
-  model TEXT NOT NULL DEFAULT '',
-  total_tokens INTEGER NOT NULL DEFAULT 0,
-  total_cost_usd REAL NOT NULL DEFAULT 0,
-  exact_events INTEGER NOT NULL DEFAULT 0,
-  derived_events INTEGER NOT NULL DEFAULT 0,
-  estimated_events INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (day, source_app, provider, model)
-);
-`;
+/** Silver layer: one row per OTLP span. */
+export interface SilverSpanRecord {
+  id: string;
+  bronze_id: number;
+  received_at: string;
+  trace_id: string | null;
+  span_id: string | null;
+  parent_span_id: string | null;
+  name: string | null;
+  kind: number | null;
+  start_time_unix_nano: number | null;
+  end_time_unix_nano: number | null;
+  status_code: number | null;
+  service_name: string | null;
+  session_id: string | null;
+  extra_attributes_json: string | null;
+}
 
-const CREATE_SESSION_SUMMARY_TABLE = `
-CREATE TABLE IF NOT EXISTS session_summaries (
-  session_id TEXT PRIMARY KEY,
-  source_app TEXT NOT NULL,
-  started_at TEXT,
-  ended_at TEXT,
-  repo_path TEXT,
-  git_branch TEXT,
-  total_tokens INTEGER,
-  total_cost_usd REAL,
-  confidence TEXT NOT NULL CHECK(confidence IN ('exact','derived','estimated'))
+const CREATE_SILVER_SPAN_RECORDS_TABLE = `
+CREATE TABLE IF NOT EXISTS silver_span_records (
+  id TEXT PRIMARY KEY,
+  bronze_id INTEGER NOT NULL REFERENCES bronze_raw_payloads(id),
+  received_at TEXT NOT NULL,
+  trace_id TEXT,
+  span_id TEXT,
+  parent_span_id TEXT,
+  name TEXT,
+  kind INTEGER,
+  start_time_unix_nano INTEGER,
+  end_time_unix_nano INTEGER,
+  status_code INTEGER,
+  service_name TEXT,
+  session_id TEXT,
+  extra_attributes_json TEXT
 );
 `;
 
@@ -112,96 +249,64 @@ export function initializeDatabase(dbPath: string = ":memory:"): Database.Databa
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
-  db.exec(CREATE_USAGE_EVENTS_TABLE);
-  db.exec(CREATE_DAILY_ROLLUP_TABLE);
-  db.exec(CREATE_SESSION_SUMMARY_TABLE);
+  db.exec(CREATE_BRONZE_RAW_PAYLOADS_TABLE);
+  db.exec(CREATE_SILVER_METRIC_POINTS_TABLE);
+  db.exec(CREATE_SILVER_LOG_RECORDS_TABLE);
+  db.exec(CREATE_SILVER_SPAN_RECORDS_TABLE);
 
-  // Migrate daily_usage_rollups from nullable PK columns to NOT NULL DEFAULT '' (Issue 1.2)
   if (dbPath !== ":memory:") {
-    const info = db.prepare("PRAGMA table_info(daily_usage_rollups)").all() as { name: string; notnull: number }[];
-    const modelCol = info.find((c) => c.name === "model");
-    if (modelCol?.notnull === 0) {
-      db.exec("DROP TABLE IF EXISTS daily_usage_rollups");
-      db.exec(CREATE_DAILY_ROLLUP_TABLE);
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='raw_payloads'").all() as { name: string }[];
+    if (tables.length > 0) {
+      db.exec("INSERT INTO bronze_raw_payloads (kind, received_at, body) SELECT kind, received_at, body FROM raw_payloads");
+      db.exec("DROP TABLE raw_payloads");
+    }
+    const silverLogInfo = db.prepare("PRAGMA table_info(silver_log_records)").all() as { name: string }[];
+    const silverLogCols = new Set(silverLogInfo.map((c) => c.name));
+    const logColumnsToAdd = [
+      "user_id", "organization_id", "user_email", "user_account_uuid", "user_account_id",
+      "terminal_type", "event_name", "event_timestamp", "event_sequence", "prompt_id", "prompt", "prompt_length", "model",
+      "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "cost_usd", "duration_ms", "speed",
+    ];
+    for (const col of logColumnsToAdd) {
+      if (!silverLogCols.has(col)) {
+        const sqlType = col === "event_sequence" || col === "input_tokens" || col === "output_tokens" || col === "cache_read_tokens" || col === "cache_creation_tokens" || col === "duration_ms" || col === "prompt_length"
+          ? "INTEGER"
+          : col === "cost_usd"
+            ? "REAL"
+            : "TEXT";
+        db.exec(`ALTER TABLE silver_log_records ADD COLUMN ${col} ${sqlType}`);
+      }
     }
   }
+  db.exec("DROP VIEW IF EXISTS usage_events");
+  db.exec(CREATE_USAGE_EVENTS_VIEW);
 
-  db.exec("CREATE INDEX IF NOT EXISTS idx_usage_events_timestamp ON usage_events(timestamp)");
-  db.exec("CREATE INDEX IF NOT EXISTS idx_usage_events_source_date ON usage_events(source_app, timestamp)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_bronze_raw_payloads_kind ON bronze_raw_payloads(kind, received_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_silver_metric_points_session_time ON silver_metric_points(session_id, time_unix_nano)");
   return db;
 }
 
-export function insertUsageEvent(
+/** Generic insert: one row per object. Columns from first row's keys; uses INSERT OR REPLACE. */
+export function insertRows(
   db: Database.Database,
-  event: UsageEvent,
+  tableName: string,
+  rows: unknown[],
 ): void {
-  const stmt = db.prepare(`
-    INSERT OR REPLACE INTO usage_events (
-      id, source_app, source_kind, source_confidence, event_type, timestamp,
-      provider, model, session_id, prompt_id,
-      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, total_tokens,
-      cost_usd, currency,
-      terminal_type, repo_path, git_branch, project_name,
-      raw_ref, redaction_state, imported_at
-    ) VALUES (
-      @id, @source_app, @source_kind, @source_confidence, @event_type, @timestamp,
-      @provider, @model, @session_id, @prompt_id,
-      @input_tokens, @output_tokens, @cache_read_tokens, @cache_creation_tokens, @total_tokens,
-      @cost_usd, @currency,
-      @terminal_type, @repo_path, @git_branch, @project_name,
-      @raw_ref, @redaction_state, @imported_at
-    )
-  `);
-  stmt.run(event);
-}
-
-/** Normalize provider/model for rollup PK (NULL → ''). */
-function rollupKey(s: string | null): string {
-  return s ?? "";
-}
-
-/** Upsert one event's contribution into daily_usage_rollups. Idempotent when called once per new event. */
-export function upsertDailyRollup(db: Database.Database, event: UsageEvent): void {
-  const day = event.timestamp.slice(0, 10);
-  const provider = rollupKey(event.provider);
-  const model = rollupKey(event.model);
-  const totalTokens = event.total_tokens ?? 0;
-  const costUsd = event.cost_usd ?? 0;
-  const exact = event.source_confidence === "exact" ? 1 : 0;
-  const derived = event.source_confidence === "derived" ? 1 : 0;
-  const estimated = event.source_confidence === "estimated" ? 1 : 0;
-
-  db.prepare(`
-    INSERT INTO daily_usage_rollups (day, source_app, provider, model, total_tokens, total_cost_usd, exact_events, derived_events, estimated_events)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(day, source_app, provider, model) DO UPDATE SET
-      total_tokens = total_tokens + excluded.total_tokens,
-      total_cost_usd = total_cost_usd + excluded.total_cost_usd,
-      exact_events = exact_events + excluded.exact_events,
-      derived_events = derived_events + excluded.derived_events,
-      estimated_events = estimated_events + excluded.estimated_events
-  `).run(day, event.source_app, provider, model, totalTokens, costUsd, exact, derived, estimated);
-}
-
-export function insertUsageEvents(
-  db: Database.Database,
-  events: UsageEvent[],
-): void {
-  if (events.length === 0) {
-    return;
-  }
-
-  const exists = db.prepare("SELECT 1 FROM usage_events WHERE id = ?").pluck();
-  const insert = db.transaction((batch: UsageEvent[]) => {
-    for (const event of batch) {
-      const isNew = exists.get(event.id) === undefined;
-      insertUsageEvent(db, event);
-      if (isNew) {
-        upsertDailyRollup(db, event);
-      }
+  if (rows.length === 0) return;
+  const first = rows[0];
+  if (first == null || typeof first !== "object" || Array.isArray(first)) return;
+  const keys = Object.keys(first as Record<string, unknown>);
+  const cols = keys.join(", ");
+  const placeholders = keys.map((k) => `@${k}`).join(", ");
+  const stmt = db.prepare(
+    `INSERT OR REPLACE INTO ${tableName} (${cols}) VALUES (${placeholders})`,
+  );
+  const runMany = db.transaction((batch: unknown[]) => {
+    for (const row of batch) {
+      if (row != null && typeof row === "object" && !Array.isArray(row)) stmt.run(row as Record<string, unknown>);
     }
   });
-  insert(events);
+  runMany(rows);
 }
 
 export function getEventCount(db: Database.Database): number {
@@ -209,98 +314,16 @@ export function getEventCount(db: Database.Database): number {
   return row.count;
 }
 
-export function getTodayTokenTotal(db: Database.Database): number {
-  const today = new Date().toISOString().slice(0, 10);
-  const row = db.prepare(
-    "SELECT COALESCE(SUM(total_tokens), 0) as total FROM usage_events WHERE date(timestamp) = ?",
-  ).get(today) as { total: number };
-  return row.total;
-}
-
-export function getTodayCostTotal(db: Database.Database): number {
-  const today = new Date().toISOString().slice(0, 10);
-  const row = db.prepare(
-    "SELECT COALESCE(SUM(cost_usd), 0) as total FROM usage_events WHERE date(timestamp) = ?",
-  ).get(today) as { total: number };
-  return row.total;
-}
-
-export interface HourlyTotal {
-  hour: number;
-  tokens: number;
-  cost_usd: number;
-}
-
-/** Hourly buckets for the given date (YYYY-MM-DD). Returns 24 rows (hour 0–23); missing hours have tokens/cost 0. */
-export function getHourlyTotals(db: Database.Database, date: string): HourlyTotal[] {
-  const dayStart = date + "T00:00:00.000Z";
-  const dayEnd = date + "T23:59:59.999Z";
-  const rows = db
-    .prepare(
-      `SELECT CAST(strftime('%H', timestamp) AS INTEGER) as hour,
-              COALESCE(SUM(total_tokens), 0) as tokens,
-              COALESCE(SUM(cost_usd), 0) as cost_usd
-       FROM usage_events
-       WHERE timestamp >= ? AND timestamp <= ?
-       GROUP BY strftime('%H', timestamp)
-       ORDER BY hour`,
-    )
-    .all(dayStart, dayEnd) as { hour: number; tokens: number; cost_usd: number }[];
-
-  const byHour = new Map<number, HourlyTotal>();
-  for (let h = 0; h < 24; h++) {
-    byHour.set(h, { hour: h, tokens: 0, cost_usd: 0 });
-  }
-  for (const r of rows) {
-    byHour.set(r.hour, { hour: r.hour, tokens: r.tokens, cost_usd: r.cost_usd });
-  }
-  return Array.from(byHour.values()).sort((a, b) => a.hour - b.hour);
-}
-
-export interface DailyTotal {
-  day: string;
-  tokens: number;
-  cost_usd: number;
-}
-
-/** Daily totals for the last `days` days including today. At most `days` rows, sorted ascending by day. */
-export function getDailyTotals(db: Database.Database, days: number): DailyTotal[] {
-  const today = new Date().toISOString().slice(0, 10);
-  const start = new Date(today + "T00:00:00Z");
-  start.setUTCDate(start.getUTCDate() - (days - 1));
-  const startDay = start.toISOString().slice(0, 10);
-  const rows = db
-    .prepare(
-      `SELECT day, SUM(total_tokens) as tokens, SUM(total_cost_usd) as cost_usd
-       FROM daily_usage_rollups
-       WHERE day >= ? AND day <= ?
-       GROUP BY day
-       ORDER BY day ASC`,
-    )
-    .all(startDay, today) as { day: string; tokens: number; cost_usd: number }[];
-  return rows.map((r) => ({ day: r.day, tokens: r.tokens ?? 0, cost_usd: r.cost_usd ?? 0 }));
-}
-
-export function getTodayConfidenceMix(db: Database.Database): {
-  exact: number;
-  derived: number;
-  estimated: number;
-} {
-  const today = new Date().toISOString().slice(0, 10);
-  const row = db
-    .prepare(
-      `SELECT
-         SUM(CASE WHEN source_confidence = 'exact' THEN 1 ELSE 0 END) as exact,
-         SUM(CASE WHEN source_confidence = 'derived' THEN 1 ELSE 0 END) as derived,
-         SUM(CASE WHEN source_confidence = 'estimated' THEN 1 ELSE 0 END) as estimated
-       FROM usage_events WHERE date(timestamp) = ?`,
-    )
-    .get(today) as { exact: number; derived: number; estimated: number };
-  return {
-    exact: row?.exact ?? 0,
-    derived: row?.derived ?? 0,
-    estimated: row?.estimated ?? 0,
-  };
+/** Inserts a raw payload into bronze layer. Returns the inserted row id for silver FK. */
+export function insertBronzeRawPayload(
+  db: Database.Database,
+  kind: "metrics" | "logs" | "traces",
+  body: string,
+): number {
+  const result = db.prepare(
+    "INSERT INTO bronze_raw_payloads (kind, received_at, body) VALUES (?, ?, ?)",
+  ).run(kind, new Date().toISOString(), body);
+  return result.lastInsertRowid as number;
 }
 
 export function getUsageSummary(db: Database.Database): {
@@ -310,7 +333,7 @@ export function getUsageSummary(db: Database.Database): {
 } {
   return db
     .prepare(
-      "SELECT COUNT(*) as events, COALESCE(SUM(total_tokens), 0) as total_tokens, COALESCE(SUM(cost_usd), 0) as total_cost_usd FROM usage_events",
+      "SELECT COUNT(*) as events, COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0) as total_tokens, COALESCE(SUM(cost_usd), 0) as total_cost_usd FROM usage_events",
     )
     .get() as {
     events: number;
